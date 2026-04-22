@@ -1,0 +1,314 @@
+use crate::ast::{Declaration, FieldDeclaration, Parameter, SourceFile, Statement};
+use std::fmt::{self, Write};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IrProgram {
+    pub module_path: Vec<String>,
+    pub imports: Vec<Vec<String>>,
+    pub declarations: Vec<IrDeclaration>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IrDeclaration {
+    Record(IrRecord),
+    Function(IrFunction),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IrRecord {
+    pub name: String,
+    pub fields: Vec<IrField>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IrField {
+    pub name: String,
+    pub type_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IrFunction {
+    pub name: String,
+    pub parameters: Vec<IrParameter>,
+    pub return_type: String,
+    pub body: Vec<IrStatement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IrParameter {
+    pub name: String,
+    pub type_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IrStatement {
+    Let {
+        name: String,
+        value: String,
+    },
+    Mutable {
+        name: String,
+        type_name: String,
+        value: String,
+    },
+    Set {
+        target: String,
+        value: String,
+    },
+    If {
+        condition: String,
+        then_body: Vec<IrStatement>,
+        else_body: Vec<IrStatement>,
+    },
+    RepeatWhile {
+        condition: String,
+        body: Vec<IrStatement>,
+    },
+    Return {
+        value: Option<String>,
+    },
+    Expr {
+        value: String,
+    },
+}
+
+pub fn lower_source_file(file: &SourceFile) -> IrProgram {
+    IrProgram {
+        module_path: file.module_path.clone(),
+        imports: file.imports.clone(),
+        declarations: file.declarations.iter().map(lower_declaration).collect(),
+    }
+}
+
+pub fn render_program(program: &IrProgram) -> String {
+    let mut output = String::new();
+    writeln!(&mut output, "module {}", program.module_path.join(".")).unwrap();
+
+    for import in &program.imports {
+        writeln!(&mut output, "import {}", import.join(".")).unwrap();
+    }
+
+    if !program.imports.is_empty() && !program.declarations.is_empty() {
+        output.push('\n');
+    }
+
+    for (index, declaration) in program.declarations.iter().enumerate() {
+        if index > 0 {
+            output.push('\n');
+        }
+        render_declaration(&mut output, declaration, 0).unwrap();
+    }
+
+    output
+}
+
+fn lower_declaration(declaration: &Declaration) -> IrDeclaration {
+    match declaration {
+        Declaration::Record(record) => IrDeclaration::Record(IrRecord {
+            name: record.name.clone(),
+            fields: record.fields.iter().map(lower_field).collect(),
+        }),
+        Declaration::Function(function) => IrDeclaration::Function(IrFunction {
+            name: function.name.clone(),
+            parameters: function.parameters.iter().map(lower_parameter).collect(),
+            return_type: function.return_type.name.clone(),
+            body: lower_statements(&function.body),
+        }),
+    }
+}
+
+fn lower_field(field: &FieldDeclaration) -> IrField {
+    IrField {
+        name: field.name.clone(),
+        type_name: field.field_type.name.clone(),
+    }
+}
+
+fn lower_parameter(parameter: &Parameter) -> IrParameter {
+    IrParameter {
+        name: parameter.name.clone(),
+        type_name: parameter.parameter_type.name.clone(),
+    }
+}
+
+fn lower_statements(statements: &[Statement]) -> Vec<IrStatement> {
+    statements.iter().map(lower_statement).collect()
+}
+
+fn lower_statement(statement: &Statement) -> IrStatement {
+    match statement {
+        Statement::Let { name, value } => IrStatement::Let {
+            name: name.clone(),
+            value: value.clone(),
+        },
+        Statement::Mutable {
+            name,
+            value_type,
+            value,
+        } => IrStatement::Mutable {
+            name: name.clone(),
+            type_name: value_type.name.clone(),
+            value: value.clone(),
+        },
+        Statement::Set { target, value } => IrStatement::Set {
+            target: target.clone(),
+            value: value.clone(),
+        },
+        Statement::If {
+            condition,
+            then_body,
+            else_body,
+        } => IrStatement::If {
+            condition: condition.clone(),
+            then_body: lower_statements(then_body),
+            else_body: lower_statements(else_body),
+        },
+        Statement::RepeatWhile { condition, body } => IrStatement::RepeatWhile {
+            condition: condition.clone(),
+            body: lower_statements(body),
+        },
+        Statement::Return { value } => IrStatement::Return {
+            value: value.clone(),
+        },
+        Statement::Expression { value } => IrStatement::Expr {
+            value: value.clone(),
+        },
+    }
+}
+
+fn render_declaration(
+    output: &mut String,
+    declaration: &IrDeclaration,
+    indent: usize,
+) -> fmt::Result {
+    match declaration {
+        IrDeclaration::Record(record) => {
+            writeln!(output, "{}record {}", indent_text(indent), record.name)?;
+            for field in &record.fields {
+                writeln!(
+                    output,
+                    "{}field {}: {}",
+                    indent_text(indent + 1),
+                    field.name,
+                    field.type_name
+                )?;
+            }
+        }
+        IrDeclaration::Function(function) => {
+            let parameters = function
+                .parameters
+                .iter()
+                .map(|parameter| format!("{}: {}", parameter.name, parameter.type_name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(
+                output,
+                "{}fn {}({}) -> {}",
+                indent_text(indent),
+                function.name,
+                parameters,
+                function.return_type
+            )?;
+            for statement in &function.body {
+                render_statement(output, statement, indent + 1)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn render_statement(output: &mut String, statement: &IrStatement, indent: usize) -> fmt::Result {
+    match statement {
+        IrStatement::Let { name, value } => {
+            writeln!(output, "{}let {} = {}", indent_text(indent), name, value)?;
+        }
+        IrStatement::Mutable {
+            name,
+            type_name,
+            value,
+        } => {
+            writeln!(
+                output,
+                "{}mutable {}: {} = {}",
+                indent_text(indent),
+                name,
+                type_name,
+                value
+            )?;
+        }
+        IrStatement::Set { target, value } => {
+            writeln!(output, "{}set {} = {}", indent_text(indent), target, value)?;
+        }
+        IrStatement::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            writeln!(output, "{}if {}", indent_text(indent), condition)?;
+            for statement in then_body {
+                render_statement(output, statement, indent + 1)?;
+            }
+            if !else_body.is_empty() {
+                writeln!(output, "{}else", indent_text(indent))?;
+                for statement in else_body {
+                    render_statement(output, statement, indent + 1)?;
+                }
+            }
+        }
+        IrStatement::RepeatWhile { condition, body } => {
+            writeln!(output, "{}repeat_while {}", indent_text(indent), condition)?;
+            for statement in body {
+                render_statement(output, statement, indent + 1)?;
+            }
+        }
+        IrStatement::Return { value } => match value {
+            Some(value) => writeln!(output, "{}return {}", indent_text(indent), value)?,
+            None => writeln!(output, "{}return", indent_text(indent))?,
+        },
+        IrStatement::Expr { value } => {
+            writeln!(output, "{}expr {}", indent_text(indent), value)?;
+        }
+    }
+    Ok(())
+}
+
+fn indent_text(indent: usize) -> String {
+    "    ".repeat(indent)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{lower_source_file, render_program};
+    use crate::parser::parse_source;
+    use crate::typecheck::validate_source_file;
+
+    #[test]
+    fn lowers_and_renders_nested_control_flow() {
+        let source = r#"module demo.ir
+
+import standard.io
+
+define function main takes ready as boolean returns integer
+    if ready
+        io.print_line("go")
+        return 1
+    else
+        repeat while false
+            io.print_line("wait")
+
+    return 0
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let program = lower_source_file(&file);
+        let rendered = render_program(&program);
+
+        assert!(rendered.contains("module demo.ir"));
+        assert!(rendered.contains("fn main(ready: boolean) -> integer"));
+        assert!(rendered.contains("if ready"));
+        assert!(rendered.contains("expr io.print_line(\"go\")"));
+        assert!(rendered.contains("repeat_while false"));
+        assert!(rendered.contains("return 0"));
+    }
+}

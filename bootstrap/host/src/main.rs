@@ -3,6 +3,7 @@
 mod ast;
 mod diagnostic;
 mod interpreter;
+mod ir;
 mod lexer;
 mod parser;
 mod span;
@@ -20,6 +21,7 @@ fn print_help() {
     println!("  etl check <file.etl>");
     println!("  etl run <file.etl>");
     println!("  etl format <file.etl>");
+    println!("  etl compile <file.etl> --to ir");
     println!("  etl compile <file.etl> --to asm");
     println!("  etl compile <file.etl> --to native --target linux-x86_64");
 }
@@ -46,6 +48,34 @@ fn check_or_exit(path: &str) -> ast::SourceFile {
         process::exit(1);
     });
     file
+}
+
+fn compile_ir_or_exit(path: &str) {
+    let file = check_or_exit(path);
+    let program = ir::lower_source_file(&file);
+    print!("{}", ir::render_program(&program));
+}
+
+fn compile_or_exit(args: &[String]) {
+    if args.len() < 5 {
+        eprintln!("compile requires a file path and --to <target>");
+        process::exit(1);
+    }
+
+    let path = &args[2];
+    if args[3] != "--to" {
+        eprintln!("compile requires --to <target>");
+        process::exit(1);
+    }
+
+    match args[4].as_str() {
+        "ir" => compile_ir_or_exit(path),
+        "asm" | "native" => println!("compile target not implemented yet: {}", args[4]),
+        other => {
+            eprintln!("unknown compile target: {other}");
+            process::exit(1);
+        }
+    }
 }
 
 fn main() {
@@ -85,7 +115,7 @@ fn main() {
             process::exit(exit_code as i32);
         }
         "format" => println!("format command not implemented yet"),
-        "compile" => println!("compile command not implemented yet"),
+        "compile" => compile_or_exit(&args),
         _ => print_help(),
     }
 }

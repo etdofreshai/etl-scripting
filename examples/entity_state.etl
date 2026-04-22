@@ -1,0 +1,14 @@
+module game.entity_state
+
+define record entity_state
+    id as integer
+    health as integer
+    stamina as integer
+    active as boolean
+
+
+define function can_act takes entity as entity_state returns boolean
+    if entity.active == false
+        return false
+
+    return entity.health > 0 and entity.stamina > 0

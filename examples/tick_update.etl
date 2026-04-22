@@ -1,0 +1,9 @@
+module game.tick_update
+
+define record mover_state
+    x as integer
+    velocity as integer
+
+
+define function step takes current as mover_state, ticks as integer returns mover_state
+    return mover_state(x current.x + current.velocity * ticks, velocity current.velocity)

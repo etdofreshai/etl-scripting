@@ -1,0 +1,4 @@
+module demo.simple_math
+
+define function add takes left as integer, right as integer returns integer
+    return left + right

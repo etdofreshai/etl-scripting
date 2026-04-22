@@ -1,0 +1,7 @@
+module demo.hello_world
+
+import standard.io
+
+define function main returns integer
+    io.print_line("Hello from ETL")
+    return 0

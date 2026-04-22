@@ -1,0 +1,9 @@
+module demo.counter_loop
+
+define function count_to takes limit as integer returns integer
+    mutable current as integer be 0
+
+    repeat while current < limit
+        set current to current + 1
+
+    return current

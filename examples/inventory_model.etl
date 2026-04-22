@@ -1,0 +1,5 @@
+module game.inventory_model
+
+define record inventory_item
+    id as integer
+    count as integer

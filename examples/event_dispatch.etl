@@ -1,0 +1,7 @@
+module game.event_dispatch
+
+import standard.game.event
+
+define function enqueue_hit_event takes entity_id as integer, damage as integer returns integer
+    event.push_hit(entity_id, damage)
+    return damage

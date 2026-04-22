@@ -1,0 +1,7 @@
+module game.health_check
+
+define function is_alive takes health as integer returns boolean
+    if health > 0
+        return true
+    else
+        return false

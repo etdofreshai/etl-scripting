@@ -1,0 +1,7 @@
+module game.seeded_random
+
+import standard.random
+
+define function next_spawn_value takes seed as integer returns integer
+    let generator be random.from_seed(seed)
+    return random.next_integer(generator, 1, 10)

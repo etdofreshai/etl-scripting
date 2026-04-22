@@ -1,0 +1,14 @@
+module game.damage_resolution
+
+define record attack_result
+    amount as integer
+    was_critical as boolean
+
+
+define function resolve_damage takes power as integer, armor as integer returns attack_result
+    let reduced be power - armor
+
+    if reduced < 1
+        return attack_result(amount 1, was_critical false)
+
+    return attack_result(amount reduced, was_critical false)

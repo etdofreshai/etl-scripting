@@ -3,8 +3,10 @@ use std::collections::{HashMap, HashSet};
 
 const BUILTIN_TYPES: &[&str] = &["integer", "float", "boolean", "text", "void"];
 
+#[derive(Clone)]
 struct FunctionSignature {
     parameter_count: usize,
+    return_type: String,
 }
 
 pub fn validate_source_file(file: &SourceFile) -> Result<(), String> {
@@ -12,8 +14,9 @@ pub fn validate_source_file(file: &SourceFile) -> Result<(), String> {
         .iter()
         .map(|name| (*name).to_string())
         .collect();
-    let mut record_fields: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut functions = HashMap::new();
+    known_types.insert("standard.random.generator".to_string());
+    let mut record_fields: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut functions = builtin_functions();
     let mut seen_declarations = HashSet::new();
 
     for declaration in &file.declarations {
@@ -28,7 +31,7 @@ pub fn validate_source_file(file: &SourceFile) -> Result<(), String> {
                     record
                         .fields
                         .iter()
-                        .map(|field| field.name.clone())
+                        .map(|field| (field.name.clone(), field.field_type.name.clone()))
                         .collect(),
                 );
             }
@@ -40,6 +43,7 @@ pub fn validate_source_file(file: &SourceFile) -> Result<(), String> {
                     function.name.clone(),
                     FunctionSignature {
                         parameter_count: function.parameters.len(),
+                        return_type: function.return_type.name.clone(),
                     },
                 );
             }
@@ -65,13 +69,16 @@ pub fn validate_source_file(file: &SourceFile) -> Result<(), String> {
 fn validate_function(
     function: &FunctionDeclaration,
     known_types: &HashSet<String>,
-    record_fields: &HashMap<String, HashSet<String>>,
+    record_fields: &HashMap<String, HashMap<String, String>>,
     functions: &HashMap<String, FunctionSignature>,
 ) -> Result<(), String> {
-    let mut scope = HashSet::new();
+    let mut scope = HashMap::new();
     for parameter in &function.parameters {
         ensure_known_type(known_types, &parameter.parameter_type.name)?;
-        scope.insert(parameter.name.clone());
+        scope.insert(
+            parameter.name.clone(),
+            parameter.parameter_type.name.clone(),
+        );
     }
     ensure_known_type(known_types, &function.return_type.name)?;
     validate_statements(
@@ -87,18 +94,19 @@ fn validate_function(
 
 fn validate_statements(
     known_types: &HashSet<String>,
-    record_fields: &HashMap<String, HashSet<String>>,
+    record_fields: &HashMap<String, HashMap<String, String>>,
     functions: &HashMap<String, FunctionSignature>,
     function_name: &str,
     function_return_type: &str,
-    scope: &mut HashSet<String>,
+    scope: &mut HashMap<String, String>,
     statements: &[Statement],
 ) -> Result<(), String> {
     for statement in statements {
         match statement {
             Statement::Let { name, value } => {
-                validate_expression(value, scope, known_types, record_fields, functions)?;
-                scope.insert(name.clone());
+                let value_type =
+                    validate_expression(value, scope, known_types, record_fields, functions)?;
+                scope.insert(name.clone(), value_type);
             }
             Statement::Mutable {
                 name,
@@ -106,19 +114,33 @@ fn validate_statements(
                 value,
             } => {
                 ensure_known_type(known_types, &value_type.name)?;
-                validate_expression(value, scope, known_types, record_fields, functions)?;
-                scope.insert(name.clone());
+                let actual_type =
+                    validate_expression(value, scope, known_types, record_fields, functions)?;
+                ensure_type_matches(
+                    &value_type.name,
+                    &actual_type,
+                    &format!("variable `{name}` declared as"),
+                )?;
+                scope.insert(name.clone(), value_type.name.clone());
             }
             Statement::Set { target, value } => {
-                validate_reference(target, scope)?;
-                validate_expression(value, scope, known_types, record_fields, functions)?;
+                let target_type = validate_reference(target, scope, record_fields)?;
+                let value_type =
+                    validate_expression(value, scope, known_types, record_fields, functions)?;
+                if target_type != value_type {
+                    return Err(format!(
+                        "cannot assign `{value_type}` to `{target}` of type `{target_type}`"
+                    ));
+                }
             }
             Statement::If {
                 condition,
                 then_body,
                 else_body,
             } => {
-                validate_expression(condition, scope, known_types, record_fields, functions)?;
+                let condition_type =
+                    validate_expression(condition, scope, known_types, record_fields, functions)?;
+                ensure_type_matches("boolean", &condition_type, "if condition must be")?;
                 validate_statements(
                     known_types,
                     record_fields,
@@ -139,7 +161,9 @@ fn validate_statements(
                 )?;
             }
             Statement::RepeatWhile { condition, body } => {
-                validate_expression(condition, scope, known_types, record_fields, functions)?;
+                let condition_type =
+                    validate_expression(condition, scope, known_types, record_fields, functions)?;
+                ensure_type_matches("boolean", &condition_type, "repeat while condition must be")?;
                 validate_statements(
                     known_types,
                     record_fields,
@@ -174,9 +198,9 @@ fn validate_return(
     function_name: &str,
     function_return_type: &str,
     value: Option<&str>,
-    scope: &HashSet<String>,
+    scope: &HashMap<String, String>,
     known_types: &HashSet<String>,
-    record_fields: &HashMap<String, HashSet<String>>,
+    record_fields: &HashMap<String, HashMap<String, String>>,
     functions: &HashMap<String, FunctionSignature>,
 ) -> Result<(), String> {
     match (function_return_type == "void", value) {
@@ -187,7 +211,13 @@ fn validate_return(
             "function `{function_name}` must return a value of type `{function_return_type}`"
         )),
         (_, Some(expression)) => {
-            validate_expression(expression, scope, known_types, record_fields, functions)
+            let actual_type =
+                validate_expression(expression, scope, known_types, record_fields, functions)?;
+            ensure_type_matches(
+                function_return_type,
+                &actual_type,
+                &format!("function `{function_name}` must return"),
+            )
         }
         (_, None) => Ok(()),
     }
@@ -195,24 +225,41 @@ fn validate_return(
 
 fn validate_expression(
     expression: &str,
-    scope: &HashSet<String>,
+    scope: &HashMap<String, String>,
     known_types: &HashSet<String>,
-    record_fields: &HashMap<String, HashSet<String>>,
+    record_fields: &HashMap<String, HashMap<String, String>>,
     functions: &HashMap<String, FunctionSignature>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let tokens = ExprLexer::new(expression).tokenize()?;
     let mut parser = ExprParser::new(tokens, scope, known_types, record_fields, functions);
-    parser.parse_expression()?;
-    parser.ensure_complete()
+    let expression_type = parser.parse_expression()?;
+    parser.ensure_complete()?;
+    Ok(expression_type)
 }
 
-fn validate_reference(reference: &str, scope: &HashSet<String>) -> Result<(), String> {
-    let base = reference.split('.').next().unwrap_or(reference);
-    if scope.contains(base) {
-        Ok(())
-    } else {
-        Err(format!("unknown variable: {base}"))
+fn validate_reference(
+    reference: &str,
+    scope: &HashMap<String, String>,
+    record_fields: &HashMap<String, HashMap<String, String>>,
+) -> Result<String, String> {
+    let mut segments = reference.split('.');
+    let base = segments.next().unwrap_or(reference);
+    let mut current_type = scope
+        .get(base)
+        .cloned()
+        .ok_or_else(|| format!("unknown variable: {base}"))?;
+
+    for field_name in segments {
+        let fields = record_fields
+            .get(&current_type)
+            .ok_or_else(|| format!("type `{current_type}` has no fields"))?;
+        current_type = fields
+            .get(field_name)
+            .cloned()
+            .ok_or_else(|| format!("unknown field `{field_name}` for record `{current_type}`"))?;
     }
+
+    Ok(current_type)
 }
 
 fn ensure_known_type(known_types: &HashSet<String>, type_name: &str) -> Result<(), String> {
@@ -221,6 +268,47 @@ fn ensure_known_type(known_types: &HashSet<String>, type_name: &str) -> Result<(
     } else {
         Err(format!("unknown type: {type_name}"))
     }
+}
+
+fn ensure_type_matches(expected: &str, actual: &str, context: &str) -> Result<(), String> {
+    if expected == actual {
+        Ok(())
+    } else {
+        Err(format!("{context} `{expected}`, got `{actual}`"))
+    }
+}
+
+fn builtin_functions() -> HashMap<String, FunctionSignature> {
+    HashMap::from([
+        (
+            "io.print_line".to_string(),
+            FunctionSignature {
+                parameter_count: 1,
+                return_type: "void".to_string(),
+            },
+        ),
+        (
+            "random.from_seed".to_string(),
+            FunctionSignature {
+                parameter_count: 1,
+                return_type: "standard.random.generator".to_string(),
+            },
+        ),
+        (
+            "random.next_integer".to_string(),
+            FunctionSignature {
+                parameter_count: 3,
+                return_type: "integer".to_string(),
+            },
+        ),
+        (
+            "event.push_hit".to_string(),
+            FunctionSignature {
+                parameter_count: 2,
+                return_type: "void".to_string(),
+            },
+        ),
+    ])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,18 +473,18 @@ impl<'a> ExprLexer<'a> {
 struct ExprParser<'a> {
     tokens: Vec<ExprToken>,
     index: usize,
-    scope: &'a HashSet<String>,
+    scope: &'a HashMap<String, String>,
     known_types: &'a HashSet<String>,
-    record_fields: &'a HashMap<String, HashSet<String>>,
+    record_fields: &'a HashMap<String, HashMap<String, String>>,
     functions: &'a HashMap<String, FunctionSignature>,
 }
 
 impl<'a> ExprParser<'a> {
     fn new(
         tokens: Vec<ExprToken>,
-        scope: &'a HashSet<String>,
+        scope: &'a HashMap<String, String>,
         known_types: &'a HashSet<String>,
-        record_fields: &'a HashMap<String, HashSet<String>>,
+        record_fields: &'a HashMap<String, HashMap<String, String>>,
         functions: &'a HashMap<String, FunctionSignature>,
     ) -> Self {
         Self {
@@ -409,7 +497,7 @@ impl<'a> ExprParser<'a> {
         }
     }
 
-    fn parse_expression(&mut self) -> Result<(), String> {
+    fn parse_expression(&mut self) -> Result<String, String> {
         self.parse_or()
     }
 
@@ -421,79 +509,101 @@ impl<'a> ExprParser<'a> {
         }
     }
 
-    fn parse_or(&mut self) -> Result<(), String> {
-        self.parse_and()?;
+    fn parse_or(&mut self) -> Result<String, String> {
+        let mut left = self.parse_and()?;
         while self.match_token(&ExprToken::Or) {
-            self.parse_and()?;
+            ensure_type_matches("boolean", &left, "logical `or` left operand must be")?;
+            let right = self.parse_and()?;
+            ensure_type_matches("boolean", &right, "logical `or` right operand must be")?;
+            left = "boolean".to_string();
         }
-        Ok(())
+        Ok(left)
     }
 
-    fn parse_and(&mut self) -> Result<(), String> {
-        self.parse_comparison()?;
+    fn parse_and(&mut self) -> Result<String, String> {
+        let mut left = self.parse_comparison()?;
         while self.match_token(&ExprToken::And) {
-            self.parse_comparison()?;
+            ensure_type_matches("boolean", &left, "logical `and` left operand must be")?;
+            let right = self.parse_comparison()?;
+            ensure_type_matches("boolean", &right, "logical `and` right operand must be")?;
+            left = "boolean".to_string();
         }
-        Ok(())
+        Ok(left)
     }
 
-    fn parse_comparison(&mut self) -> Result<(), String> {
-        self.parse_term()?;
+    fn parse_comparison(&mut self) -> Result<String, String> {
+        let mut left = self.parse_term()?;
         loop {
-            if self.match_token(&ExprToken::EqualEqual)
-                || self.match_token(&ExprToken::Less)
+            if self.match_token(&ExprToken::EqualEqual) {
+                let right = self.parse_term()?;
+                if left != right {
+                    return Err(format!(
+                        "equality operands must have matching types, got `{left}` and `{right}`"
+                    ));
+                }
+                left = "boolean".to_string();
+            } else if self.match_token(&ExprToken::Less)
                 || self.match_token(&ExprToken::Greater)
                 || self.match_token(&ExprToken::LessEqual)
                 || self.match_token(&ExprToken::GreaterEqual)
             {
-                self.parse_term()?;
+                let right = self.parse_term()?;
+                ensure_type_matches("integer", &left, "comparison left operand must be")?;
+                ensure_type_matches("integer", &right, "comparison right operand must be")?;
+                left = "boolean".to_string();
             } else {
                 break;
             }
         }
-        Ok(())
+        Ok(left)
     }
 
-    fn parse_term(&mut self) -> Result<(), String> {
-        self.parse_factor()?;
+    fn parse_term(&mut self) -> Result<String, String> {
+        let mut left = self.parse_factor()?;
         loop {
             if self.match_token(&ExprToken::Plus) || self.match_token(&ExprToken::Minus) {
-                self.parse_factor()?;
+                let right = self.parse_factor()?;
+                ensure_type_matches("integer", &left, "arithmetic left operand must be")?;
+                ensure_type_matches("integer", &right, "arithmetic right operand must be")?;
+                left = "integer".to_string();
             } else {
                 break;
             }
         }
-        Ok(())
+        Ok(left)
     }
 
-    fn parse_factor(&mut self) -> Result<(), String> {
-        self.parse_primary()?;
+    fn parse_factor(&mut self) -> Result<String, String> {
+        let mut left = self.parse_primary()?;
         loop {
             if self.match_token(&ExprToken::Star) || self.match_token(&ExprToken::Slash) {
-                self.parse_primary()?;
+                let right = self.parse_primary()?;
+                ensure_type_matches("integer", &left, "arithmetic left operand must be")?;
+                ensure_type_matches("integer", &right, "arithmetic right operand must be")?;
+                left = "integer".to_string();
             } else {
                 break;
             }
         }
-        Ok(())
+        Ok(left)
     }
 
-    fn parse_primary(&mut self) -> Result<(), String> {
+    fn parse_primary(&mut self) -> Result<String, String> {
         match self.advance().cloned() {
-            Some(ExprToken::Integer(_))
-            | Some(ExprToken::Text(_))
-            | Some(ExprToken::True)
-            | Some(ExprToken::False) => Ok(()),
+            Some(ExprToken::Integer(_)) => Ok("integer".to_string()),
+            Some(ExprToken::Text(_)) => Ok("text".to_string()),
+            Some(ExprToken::True) | Some(ExprToken::False) => Ok("boolean".to_string()),
             Some(ExprToken::Identifier(name)) => self.parse_identifier_expression(name),
             Some(ExprToken::LeftParen) => {
-                self.parse_expression()?;
-                self.expect(&ExprToken::RightParen)
+                let value_type = self.parse_expression()?;
+                self.expect(&ExprToken::RightParen)?;
+                Ok(value_type)
             }
             other => Err(format!("unexpected expression token: {other:?}")),
         }
     }
 
-    fn parse_identifier_expression(&mut self, first: String) -> Result<(), String> {
+    fn parse_identifier_expression(&mut self, first: String) -> Result<String, String> {
         let mut name = first;
         while self.match_token(&ExprToken::Dot) {
             let next = self.expect_identifier()?;
@@ -508,15 +618,11 @@ impl<'a> ExprParser<'a> {
             return self.parse_call(&name);
         }
 
-        validate_reference(&name, self.scope)
+        validate_reference(&name, self.scope, self.record_fields)
     }
 
-    fn parse_call(&mut self, name: &str) -> Result<(), String> {
+    fn parse_call(&mut self, name: &str) -> Result<String, String> {
         let argument_count = self.parse_call_arguments()?;
-        if name.contains('.') {
-            return Ok(());
-        }
-
         let signature = self
             .functions
             .get(name)
@@ -527,10 +633,10 @@ impl<'a> ExprParser<'a> {
                 signature.parameter_count
             ));
         }
-        Ok(())
+        Ok(signature.return_type.clone())
     }
 
-    fn parse_record_constructor(&mut self, type_name: &str) -> Result<(), String> {
+    fn parse_record_constructor(&mut self, type_name: &str) -> Result<String, String> {
         let known_fields = self
             .record_fields
             .get(type_name)
@@ -543,12 +649,16 @@ impl<'a> ExprParser<'a> {
 
         loop {
             let field_name = self.expect_identifier()?;
-            if !known_fields.contains(&field_name) {
-                return Err(format!(
-                    "unknown field `{field_name}` for record `{type_name}`"
-                ));
-            }
-            self.parse_expression()?;
+            let field_type = known_fields
+                .get(&field_name)
+                .cloned()
+                .ok_or_else(|| format!("unknown field `{field_name}` for record `{type_name}`"))?;
+            let value_type = self.parse_expression()?;
+            ensure_type_matches(
+                &field_type,
+                &value_type,
+                &format!("record field `{field_name}` for `{type_name}` must be"),
+            )?;
             seen_fields.insert(field_name);
             if self.match_token(&ExprToken::Comma) {
                 continue;
@@ -563,17 +673,17 @@ impl<'a> ExprParser<'a> {
     fn finish_record_constructor(
         &self,
         type_name: &str,
-        known_fields: &HashSet<String>,
+        known_fields: &HashMap<String, String>,
         seen_fields: HashSet<String>,
-    ) -> Result<(), String> {
-        for field_name in known_fields {
+    ) -> Result<String, String> {
+        for field_name in known_fields.keys() {
             if !seen_fields.contains(field_name) {
                 return Err(format!(
                     "missing field `{field_name}` for record `{type_name}`"
                 ));
             }
         }
-        Ok(())
+        Ok(type_name.to_string())
     }
 
     fn parse_call_arguments(&mut self) -> Result<usize, String> {
@@ -705,6 +815,65 @@ define function main returns integer
         let file = parse_source(source).expect("source should parse");
         let error = validate_source_file(&file).expect_err("arity mismatch should fail");
         assert!(error.contains("function `add` expects 2 arguments, got 1"));
+    }
+
+    #[test]
+    fn rejects_return_value_with_wrong_type() {
+        let source = r#"module demo.bad_return_type
+
+define function main returns integer
+    return true
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        let error = validate_source_file(&file).expect_err("wrong return type should fail");
+        assert!(error.contains("function `main` must return `integer`, got `boolean`"));
+    }
+
+    #[test]
+    fn rejects_non_boolean_if_conditions() {
+        let source = r#"module demo.bad_if_condition
+
+define function main returns integer
+    if 1
+        return 1
+
+    return 0
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        let error = validate_source_file(&file).expect_err("non-boolean condition should fail");
+        assert!(error.contains("if condition must be `boolean`, got `integer`"));
+    }
+
+    #[test]
+    fn rejects_mutable_initializer_with_wrong_type() {
+        let source = r#"module demo.bad_mutable_initializer
+
+define function main returns integer
+    mutable score as integer be true
+    return 0
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        let error =
+            validate_source_file(&file).expect_err("wrong mutable initializer type should fail");
+        assert!(error.contains("variable `score` declared as `integer`, got `boolean`"));
+    }
+
+    #[test]
+    fn rejects_assignment_with_wrong_type() {
+        let source = r#"module demo.bad_assignment
+
+define function main returns integer
+    mutable score as integer be 0
+    set score to false
+    return score
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        let error = validate_source_file(&file).expect_err("wrong assignment type should fail");
+        assert!(error.contains("cannot assign `boolean` to `score` of type `integer`"));
     }
 
     #[test]

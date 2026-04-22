@@ -98,7 +98,7 @@ impl<'a> Interpreter<'a> {
             }
             Statement::Set { target, value } => {
                 let evaluated = self.evaluate_expression(value, scope)?;
-                scope.insert(target.clone(), evaluated);
+                self.assign_reference(target, evaluated, scope)?;
                 Ok(ControlFlow::Continue)
             }
             Statement::If {
@@ -185,6 +185,65 @@ impl<'a> Interpreter<'a> {
             type_name: type_name.to_string(),
             fields,
         })
+    }
+
+    fn has_record_type(&self, type_name: &str) -> bool {
+        self.file.declarations.iter().any(|declaration| {
+            matches!(declaration, Declaration::Record(record) if record.name == type_name)
+        })
+    }
+
+    fn assign_reference(
+        &self,
+        reference: &str,
+        value: Value,
+        scope: &mut HashMap<String, Value>,
+    ) -> Result<(), String> {
+        let mut segments = reference.split('.');
+        let base = segments.next().unwrap_or(reference);
+        let path: Vec<&str> = segments.collect();
+
+        if path.is_empty() {
+            scope.insert(base.to_string(), value);
+            return Ok(());
+        }
+
+        let target = scope
+            .get_mut(base)
+            .ok_or_else(|| format!("unknown variable: {base}"))?;
+        Self::assign_path(target, &path, value)
+    }
+
+    fn assign_path(target: &mut Value, path: &[&str], value: Value) -> Result<(), String> {
+        match path {
+            [] => {
+                *target = value;
+                Ok(())
+            }
+            [field_name] => match target {
+                Value::Record { fields, .. } => {
+                    if !fields.contains_key(*field_name) {
+                        return Err(format!("unknown field: {field_name}"));
+                    }
+                    fields.insert((*field_name).to_string(), value);
+                    Ok(())
+                }
+                other => Err(format!(
+                    "expected record for field assignment, got {other:?}"
+                )),
+            },
+            [field_name, rest @ ..] => match target {
+                Value::Record { fields, .. } => {
+                    let nested = fields
+                        .get_mut(*field_name)
+                        .ok_or_else(|| format!("unknown field: {field_name}"))?;
+                    Self::assign_path(nested, rest, value)
+                }
+                other => Err(format!(
+                    "expected record for field assignment, got {other:?}"
+                )),
+            },
+        }
     }
 }
 
@@ -493,6 +552,9 @@ impl<'a, 'b> ExprParser<'a, 'b> {
         }
 
         if self.match_token(&ExprToken::LeftParen) {
+            if !name.contains('.') && self.interpreter.has_record_type(&name) {
+                return self.parse_record_constructor(&name);
+            }
             let args = self.parse_call_arguments()?;
             return self.interpreter.call_named(&name, args);
         }
@@ -515,6 +577,26 @@ impl<'a, 'b> ExprParser<'a, 'b> {
             .get(&name)
             .cloned()
             .ok_or_else(|| format!("unknown variable: {name}"))
+    }
+
+    fn parse_record_constructor(&mut self, type_name: &str) -> Result<Value, String> {
+        if self.match_token(&ExprToken::RightParen) {
+            return self.interpreter.make_record(type_name, Vec::new());
+        }
+
+        let mut pairs = Vec::new();
+        loop {
+            let field_name = self.expect_identifier()?;
+            let field_value = self.parse_expression()?;
+            pairs.push((field_name, field_value));
+            if self.match_token(&ExprToken::Comma) {
+                continue;
+            }
+            self.expect(&ExprToken::RightParen)?;
+            break;
+        }
+
+        self.interpreter.make_record(type_name, pairs)
     }
 
     fn parse_call_arguments(&mut self) -> Result<Vec<Value>, String> {
@@ -630,5 +712,24 @@ define function main returns integer
         validate_source_file(&file).expect("source should validate");
         let exit_code = run_main(&file).expect("program should run");
         assert_eq!(exit_code, 3);
+    }
+
+    #[test]
+    fn runs_record_constructor_and_field_assignment_main() {
+        let source = r#"module demo.record_assignment
+
+define record counter
+    value as integer
+
+define function main returns integer
+    mutable state as counter be counter(value 1)
+    set state.value to state.value + 4
+    return state.value
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let exit_code = run_main(&file).expect("program should run");
+        assert_eq!(exit_code, 5);
     }
 }

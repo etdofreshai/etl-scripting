@@ -85,7 +85,7 @@ fn validate_function(
         );
     }
     ensure_known_type(known_types, &function.return_type.name)?;
-    validate_statements(
+    let always_returns = validate_statements(
         known_types,
         record_fields,
         functions,
@@ -93,7 +93,16 @@ fn validate_function(
         &function.return_type.name,
         &mut scope,
         &function.body,
-    )
+    )?;
+
+    if function.return_type.name != "void" && !always_returns {
+        return Err(format!(
+            "function `{}` may exit without returning `{}`",
+            function.name, function.return_type.name
+        ));
+    }
+
+    Ok(())
 }
 
 fn validate_statements(
@@ -104,13 +113,14 @@ fn validate_statements(
     function_return_type: &str,
     scope: &mut HashMap<String, String>,
     statements: &[Statement],
-) -> Result<(), String> {
+) -> Result<bool, String> {
     for statement in statements {
-        match statement {
+        let always_returns = match statement {
             Statement::Let { name, value } => {
                 let value_type =
                     validate_expression(value, scope, known_types, record_fields, functions)?;
                 scope.insert(name.clone(), value_type);
+                false
             }
             Statement::Mutable {
                 name,
@@ -126,6 +136,7 @@ fn validate_statements(
                     &format!("variable `{name}` declared as"),
                 )?;
                 scope.insert(name.clone(), value_type.name.clone());
+                false
             }
             Statement::Set { target, value } => {
                 let target_type = validate_reference(target, scope, record_fields)?;
@@ -136,6 +147,7 @@ fn validate_statements(
                         "cannot assign `{value_type}` to `{target}` of type `{target_type}`"
                     ));
                 }
+                false
             }
             Statement::If {
                 condition,
@@ -145,38 +157,47 @@ fn validate_statements(
                 let condition_type =
                     validate_expression(condition, scope, known_types, record_fields, functions)?;
                 ensure_type_matches("boolean", &condition_type, "if condition must be")?;
-                validate_statements(
+
+                let mut then_scope = scope.clone();
+                let then_returns = validate_statements(
                     known_types,
                     record_fields,
                     functions,
                     function_name,
                     function_return_type,
-                    scope,
+                    &mut then_scope,
                     then_body,
                 )?;
-                validate_statements(
+
+                let mut else_scope = scope.clone();
+                let else_returns = validate_statements(
                     known_types,
                     record_fields,
                     functions,
                     function_name,
                     function_return_type,
-                    scope,
+                    &mut else_scope,
                     else_body,
                 )?;
+
+                then_returns && else_returns && !else_body.is_empty()
             }
             Statement::RepeatWhile { condition, body } => {
                 let condition_type =
                     validate_expression(condition, scope, known_types, record_fields, functions)?;
                 ensure_type_matches("boolean", &condition_type, "repeat while condition must be")?;
-                validate_statements(
+
+                let mut loop_scope = scope.clone();
+                let _ = validate_statements(
                     known_types,
                     record_fields,
                     functions,
                     function_name,
                     function_return_type,
-                    scope,
+                    &mut loop_scope,
                     body,
                 )?;
+                false
             }
             Statement::Return { value } => {
                 validate_return(
@@ -188,14 +209,20 @@ fn validate_statements(
                     record_fields,
                     functions,
                 )?;
+                true
             }
             Statement::Expression { value } => {
                 validate_expression(value, scope, known_types, record_fields, functions)?;
+                false
             }
+        };
+
+        if always_returns {
+            return Ok(true);
         }
     }
 
-    Ok(())
+    Ok(false)
 }
 
 fn validate_return(
@@ -907,6 +934,36 @@ define function main returns integer
         let file = parse_source(source).expect("source should parse");
         let error = validate_source_file(&file).expect_err("missing return value should fail");
         assert!(error.contains("function `main` must return a value of type `integer`"));
+    }
+
+    #[test]
+    fn rejects_non_void_function_without_any_return_statement() {
+        let source = r#"module demo.missing_return
+
+define function main returns integer
+    let score be 41
+    score + 1
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        let error = validate_source_file(&file).expect_err("missing return should fail");
+        assert!(error.contains("function `main` may exit without returning `integer`"));
+    }
+
+    #[test]
+    fn rejects_non_void_function_when_only_one_if_branch_returns() {
+        let source = r#"module demo.partial_return
+
+define function main takes ready as boolean returns integer
+    if ready
+        return 1
+
+    let fallback be 0
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        let error = validate_source_file(&file).expect_err("partial return should fail");
+        assert!(error.contains("function `main` may exit without returning `integer`"));
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 mod ast;
 mod diagnostic;
+mod interpreter;
 mod lexer;
 mod parser;
 mod span;
@@ -17,6 +18,7 @@ fn print_help() {
     println!("usage:");
     println!("  etl parse <file.etl>");
     println!("  etl check <file.etl>");
+    println!("  etl run <file.etl>");
     println!("  etl format <file.etl>");
     println!("  etl compile <file.etl> --to asm");
     println!("  etl compile <file.etl> --to native --target linux-x86_64");
@@ -69,6 +71,18 @@ fn main() {
             }
             let file = check_or_exit(&args[2]);
             println!("OK: {}", file.module_path.join("."));
+        }
+        "run" => {
+            if args.len() < 3 {
+                eprintln!("run requires a file path");
+                process::exit(1);
+            }
+            let file = check_or_exit(&args[2]);
+            let exit_code = interpreter::run_main(&file).unwrap_or_else(|error| {
+                eprintln!("{error}");
+                process::exit(1);
+            });
+            process::exit(exit_code as i32);
         }
         "format" => println!("format command not implemented yet"),
         "compile" => println!("compile command not implemented yet"),

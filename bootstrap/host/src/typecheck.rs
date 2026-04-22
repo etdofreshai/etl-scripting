@@ -5,7 +5,7 @@ const BUILTIN_TYPES: &[&str] = &["integer", "float", "boolean", "text", "void"];
 
 #[derive(Clone)]
 struct FunctionSignature {
-    parameter_count: usize,
+    parameter_types: Vec<String>,
     return_type: String,
 }
 
@@ -42,7 +42,11 @@ pub fn validate_source_file(file: &SourceFile) -> Result<(), String> {
                 functions.insert(
                     function.name.clone(),
                     FunctionSignature {
-                        parameter_count: function.parameters.len(),
+                        parameter_types: function
+                            .parameters
+                            .iter()
+                            .map(|parameter| parameter.parameter_type.name.clone())
+                            .collect(),
                         return_type: function.return_type.name.clone(),
                     },
                 );
@@ -283,28 +287,32 @@ fn builtin_functions() -> HashMap<String, FunctionSignature> {
         (
             "io.print_line".to_string(),
             FunctionSignature {
-                parameter_count: 1,
+                parameter_types: vec!["text".to_string()],
                 return_type: "void".to_string(),
             },
         ),
         (
             "random.from_seed".to_string(),
             FunctionSignature {
-                parameter_count: 1,
+                parameter_types: vec!["integer".to_string()],
                 return_type: "standard.random.generator".to_string(),
             },
         ),
         (
             "random.next_integer".to_string(),
             FunctionSignature {
-                parameter_count: 3,
+                parameter_types: vec![
+                    "standard.random.generator".to_string(),
+                    "integer".to_string(),
+                    "integer".to_string(),
+                ],
                 return_type: "integer".to_string(),
             },
         ),
         (
             "event.push_hit".to_string(),
             FunctionSignature {
-                parameter_count: 2,
+                parameter_types: vec!["integer".to_string(), "integer".to_string()],
                 return_type: "void".to_string(),
             },
         ),
@@ -622,16 +630,29 @@ impl<'a> ExprParser<'a> {
     }
 
     fn parse_call(&mut self, name: &str) -> Result<String, String> {
-        let argument_count = self.parse_call_arguments()?;
+        let argument_types = self.parse_call_arguments()?;
         let signature = self
             .functions
             .get(name)
             .ok_or_else(|| format!("unknown function: {name}"))?;
-        if signature.parameter_count != argument_count {
+        if signature.parameter_types.len() != argument_types.len() {
             return Err(format!(
-                "function `{name}` expects {} arguments, got {argument_count}",
-                signature.parameter_count
+                "function `{name}` expects {} arguments, got {}",
+                signature.parameter_types.len(),
+                argument_types.len()
             ));
+        }
+        for (index, (expected, actual)) in signature
+            .parameter_types
+            .iter()
+            .zip(argument_types.iter())
+            .enumerate()
+        {
+            ensure_type_matches(
+                expected,
+                actual,
+                &format!("function `{name}` argument {} must be", index + 1),
+            )?;
         }
         Ok(signature.return_type.clone())
     }
@@ -686,22 +707,21 @@ impl<'a> ExprParser<'a> {
         Ok(type_name.to_string())
     }
 
-    fn parse_call_arguments(&mut self) -> Result<usize, String> {
+    fn parse_call_arguments(&mut self) -> Result<Vec<String>, String> {
         if self.match_token(&ExprToken::RightParen) {
-            return Ok(0);
+            return Ok(Vec::new());
         }
 
-        let mut count = 0;
+        let mut argument_types = Vec::new();
         loop {
-            self.parse_expression()?;
-            count += 1;
+            argument_types.push(self.parse_expression()?);
             if self.match_token(&ExprToken::Comma) {
                 continue;
             }
             self.expect(&ExprToken::RightParen)?;
             break;
         }
-        Ok(count)
+        Ok(argument_types)
     }
 
     fn expect_identifier(&mut self) -> Result<String, String> {
@@ -900,6 +920,39 @@ define function main returns void
         let file = parse_source(source).expect("source should parse");
         let error = validate_source_file(&file).expect_err("void return value should fail");
         assert!(error.contains("function `main` cannot return a value from a void function"));
+    }
+
+    #[test]
+    fn rejects_local_function_calls_with_wrong_argument_type() {
+        let source = r#"module demo.bad_argument_type
+
+define function add_one takes value as integer returns integer
+    return value + 1
+
+define function main returns integer
+    return add_one(true)
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        let error = validate_source_file(&file).expect_err("wrong argument type should fail");
+        assert!(error.contains("function `add_one` argument 1 must be `integer`, got `boolean`"));
+    }
+
+    #[test]
+    fn rejects_builtin_calls_with_wrong_argument_type() {
+        let source = r#"module demo.bad_builtin_argument
+
+import standard.io
+
+define function main returns integer
+    io.print_line(1)
+    return 0
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        let error =
+            validate_source_file(&file).expect_err("wrong builtin argument type should fail");
+        assert!(error.contains("function `io.print_line` argument 1 must be `text`, got `integer`"));
     }
 
     #[test]

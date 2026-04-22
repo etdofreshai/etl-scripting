@@ -1,5 +1,5 @@
 use crate::ast::{Declaration, FunctionDeclaration, SourceFile, Statement};
-use std::collections::HashMap;
+use std::{cell::Cell, collections::HashMap, rc::Rc};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
@@ -10,6 +10,7 @@ pub enum Value {
         type_name: String,
         fields: HashMap<String, Value>,
     },
+    RandomGenerator(Rc<Cell<u64>>),
     Void,
 }
 
@@ -148,15 +149,64 @@ impl<'a> Interpreter<'a> {
     fn call_named(&self, name: &str, arguments: Vec<Value>) -> Result<Value, String> {
         match name {
             "io.print_line" => {
-                let text = arguments
-                    .first()
-                    .ok_or_else(|| "io.print_line requires one argument".to_string())?
-                    .as_text()?;
+                Self::expect_argument_count(name, &arguments, 1)?;
+                let text = arguments[0].as_text()?;
                 println!("{text}");
+                Ok(Value::Void)
+            }
+            "random.from_seed" => {
+                Self::expect_argument_count(name, &arguments, 1)?;
+                let seed = arguments[0].as_int()? as u64;
+                Ok(Value::RandomGenerator(Rc::new(Cell::new(seed))))
+            }
+            "random.next_integer" => {
+                Self::expect_argument_count(name, &arguments, 3)?;
+                let generator = arguments[0].as_random_generator()?;
+                let min = arguments[1].as_int()?;
+                let max = arguments[2].as_int()?;
+                if min > max {
+                    return Err(format!(
+                        "random.next_integer requires min <= max, got {min} > {max}"
+                    ));
+                }
+
+                let next_state = Self::advance_random_state(&generator);
+                let span = (max - min + 1) as u64;
+                let offset = (next_state % span) as i64;
+                Ok(Value::Integer(min + offset))
+            }
+            "event.push_hit" => {
+                Self::expect_argument_count(name, &arguments, 2)?;
+                let _entity_id = arguments[0].as_int()?;
+                let _damage = arguments[1].as_int()?;
                 Ok(Value::Void)
             }
             _ => self.call_function(name, arguments),
         }
+    }
+
+    fn expect_argument_count(
+        name: &str,
+        arguments: &[Value],
+        expected: usize,
+    ) -> Result<(), String> {
+        if arguments.len() == expected {
+            Ok(())
+        } else {
+            Err(format!(
+                "function `{name}` expected {expected} arguments, got {}",
+                arguments.len()
+            ))
+        }
+    }
+
+    fn advance_random_state(generator: &Rc<Cell<u64>>) -> u64 {
+        let current = generator.get();
+        let next = current
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        generator.set(next);
+        next
     }
 
     fn make_record(&self, type_name: &str, pairs: Vec<(String, Value)>) -> Result<Value, String> {
@@ -264,6 +314,13 @@ impl Value {
         match self {
             Value::Text(value) => Ok(value.clone()),
             other => Err(format!("expected text, got {other:?}")),
+        }
+    }
+
+    fn as_random_generator(&self) -> Result<Rc<Cell<u64>>, String> {
+        match self {
+            Value::RandomGenerator(state) => Ok(state.clone()),
+            other => Err(format!("expected standard.random.generator, got {other:?}")),
         }
     }
 }
@@ -731,5 +788,41 @@ define function main returns integer
         validate_source_file(&file).expect("source should validate");
         let exit_code = run_main(&file).expect("program should run");
         assert_eq!(exit_code, 5);
+    }
+
+    #[test]
+    fn runs_seeded_random_main_deterministically() {
+        let source = r#"module demo.seeded_random
+
+import standard.random
+
+define function main returns integer
+    let generator be random.from_seed(7)
+    return random.next_integer(generator, 1, 10)
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let first = run_main(&file).expect("program should run");
+        let second = run_main(&file).expect("program should run repeatably");
+        assert_eq!(first, second);
+        assert!((1..=10).contains(&first));
+    }
+
+    #[test]
+    fn runs_event_push_hit_builtin_as_noop_side_effect() {
+        let source = r#"module demo.event_builtin
+
+import standard.game.event
+
+define function main returns integer
+    event.push_hit(9, 3)
+    return 3
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let exit_code = run_main(&file).expect("program should run");
+        assert_eq!(exit_code, 3);
     }
 }

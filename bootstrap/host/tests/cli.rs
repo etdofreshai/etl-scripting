@@ -45,3 +45,25 @@ fn cli_check_reports_success_for_valid_example() {
     let stdout = String::from_utf8(output.stdout).expect("stdout should be utf8");
     assert!(stdout.contains("OK"));
 }
+
+#[test]
+fn cli_check_rejects_unknown_types() {
+    let binary = env!("CARGO_BIN_EXE_etl-bootstrap-host");
+    let path = std::env::temp_dir().join("etl-invalid-type.etl");
+    std::fs::write(
+        &path,
+        "module broken.types\n\ndefine function broken takes value as mystery_type returns integer\n    return 0\n",
+    )
+    .expect("temp source should be written");
+
+    let output = Command::new(binary)
+        .arg("check")
+        .arg(&path)
+        .output()
+        .expect("check command should run");
+
+    assert!(!output.status.success(), "check command should fail");
+
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be utf8");
+    assert!(stderr.contains("unknown type: mystery_type"));
+}

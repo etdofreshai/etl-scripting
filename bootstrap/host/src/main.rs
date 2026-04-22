@@ -6,6 +6,7 @@ mod lexer;
 mod parser;
 mod span;
 mod token;
+mod typecheck;
 
 use std::env;
 use std::fs;
@@ -36,6 +37,15 @@ fn parse_or_exit(path: &str) -> ast::SourceFile {
     })
 }
 
+fn check_or_exit(path: &str) -> ast::SourceFile {
+    let file = parse_or_exit(path);
+    typecheck::validate_source_file(&file).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        process::exit(1);
+    });
+    file
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() <= 1 {
@@ -57,7 +67,7 @@ fn main() {
                 eprintln!("check requires a file path");
                 process::exit(1);
             }
-            let file = parse_or_exit(&args[2]);
+            let file = check_or_exit(&args[2]);
             println!("OK: {}", file.module_path.join("."));
         }
         "format" => println!("format command not implemented yet"),

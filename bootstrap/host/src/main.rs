@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+mod asm;
 mod ast;
 mod diagnostic;
 mod interpreter;
@@ -68,6 +69,16 @@ fn compile_lir_or_exit(path: &str) {
     print!("{}", lir::render_program(&linear_program));
 }
 
+fn compile_asm_or_exit(path: &str) {
+    let file = check_or_exit(path);
+    let ir_program = ir::lower_source_file(&file);
+    let linear_program = lir::lower_program(&ir_program).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        process::exit(1);
+    });
+    print!("{}", asm::render_program(&linear_program));
+}
+
 fn compile_or_exit(args: &[String]) {
     if args.len() < 5 {
         eprintln!("compile requires a file path and --to <target>");
@@ -83,7 +94,8 @@ fn compile_or_exit(args: &[String]) {
     match args[4].as_str() {
         "ir" => compile_ir_or_exit(path),
         "lir" => compile_lir_or_exit(path),
-        "asm" | "native" => println!("compile target not implemented yet: {}", args[4]),
+        "asm" => compile_asm_or_exit(path),
+        "native" => println!("compile target not implemented yet: {}", args[4]),
         other => {
             eprintln!("unknown compile target: {other}");
             process::exit(1);

@@ -1,0 +1,105 @@
+use crate::lir::{LinearInstruction, LinearProgram};
+use std::fmt::Write;
+
+pub fn render_program(program: &LinearProgram) -> String {
+    let mut output = String::new();
+    writeln!(&mut output, "section .text").unwrap();
+
+    for function in &program.functions {
+        writeln!(&mut output, "global {}", function.name).unwrap();
+    }
+
+    if !program.functions.is_empty() {
+        output.push('\n');
+    }
+
+    for (index, function) in program.functions.iter().enumerate() {
+        if index > 0 {
+            output.push('\n');
+        }
+
+        writeln!(&mut output, "{}:", function.name).unwrap();
+        for instruction in &function.instructions {
+            match instruction {
+                LinearInstruction::Label(name) => {
+                    writeln!(&mut output, "{}:", name).unwrap();
+                }
+                other => {
+                    writeln!(&mut output, "    {}", render_instruction(other)).unwrap();
+                }
+            }
+        }
+    }
+
+    output
+}
+
+fn render_instruction(instruction: &LinearInstruction) -> String {
+    match instruction {
+        LinearInstruction::LoadInteger(value) => format!("push_int {value}"),
+        LinearInstruction::LoadBoolean(value) => format!("push_bool {value}"),
+        LinearInstruction::LoadText(value) => format!("push_text {value:?}"),
+        LinearInstruction::LoadReference(path) => format!("load {}", path.join(".")),
+        LinearInstruction::ConstructRecord {
+            type_name,
+            field_count,
+        } => format!("construct_record {type_name}, {field_count}"),
+        LinearInstruction::Call {
+            callee,
+            argument_count,
+        } => format!("call {}, {}", callee.join("."), argument_count),
+        LinearInstruction::Add => "add".to_string(),
+        LinearInstruction::Subtract => "sub".to_string(),
+        LinearInstruction::Multiply => "mul".to_string(),
+        LinearInstruction::Divide => "div".to_string(),
+        LinearInstruction::CompareEqual => "cmp_eq".to_string(),
+        LinearInstruction::CompareLess => "cmp_lt".to_string(),
+        LinearInstruction::CompareGreater => "cmp_gt".to_string(),
+        LinearInstruction::CompareLessEqual => "cmp_le".to_string(),
+        LinearInstruction::CompareGreaterEqual => "cmp_ge".to_string(),
+        LinearInstruction::LogicalAnd => "and".to_string(),
+        LinearInstruction::LogicalOr => "or".to_string(),
+        LinearInstruction::StoreLocal(name) => format!("store_local {name}"),
+        LinearInstruction::StoreReference(path) => format!("store {}", path.join(".")),
+        LinearInstruction::Jump(name) => format!("jmp {name}"),
+        LinearInstruction::JumpIfFalse(name) => format!("jmp_if_false {name}"),
+        LinearInstruction::Pop => "pop".to_string(),
+        LinearInstruction::Return => "ret".to_string(),
+        LinearInstruction::Label(_) => unreachable!("labels are rendered separately"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_program;
+    use crate::ir::lower_source_file;
+    use crate::lir::lower_program;
+    use crate::parser::parse_source;
+    use crate::typecheck::validate_source_file;
+
+    #[test]
+    fn renders_linear_program_as_textual_assembly() {
+        let source = r#"module demo.asm
+
+define function main takes ready as boolean returns integer
+    if ready
+        return 1
+    else
+        return 0
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let ir = lower_source_file(&file);
+        let linear = lower_program(&ir).expect("linear lowering should succeed");
+        let asm = render_program(&linear);
+
+        assert!(asm.contains("section .text"));
+        assert!(asm.contains("global main"));
+        assert!(asm.contains("main:"));
+        assert!(asm.contains("    load ready"));
+        assert!(asm.contains("    jmp_if_false main_if_else_0"));
+        assert!(asm.contains("main_if_else_0:"));
+        assert!(asm.contains("    ret"));
+    }
+}

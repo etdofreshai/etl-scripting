@@ -116,3 +116,28 @@ fn cli_compile_to_lir_prints_linear_lowering() {
     assert!(stdout.contains("load_integer 0"));
     assert!(stdout.contains("return"));
 }
+
+#[test]
+fn cli_compile_to_asm_prints_textual_assembly() {
+    let binary = env!("CARGO_BIN_EXE_etl-bootstrap-host");
+    let output = Command::new(binary)
+        .arg("compile")
+        .arg(example_path("hello_world.etl"))
+        .arg("--to")
+        .arg("asm")
+        .output()
+        .expect("compile command should run");
+
+    assert!(
+        output.status.success(),
+        "compile command failed: {:?}",
+        output
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf8");
+    assert!(stdout.contains("section .text"));
+    assert!(stdout.contains("global main"));
+    assert!(stdout.contains("main:"));
+    assert!(stdout.contains("    call io.print_line, 1"));
+    assert!(stdout.contains("    ret"));
+}

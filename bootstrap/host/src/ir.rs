@@ -58,6 +58,12 @@ pub enum IrCompareOp {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IrLogicalOp {
+    And,
+    Or,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IrExpr {
     Integer(i64),
     Boolean(bool),
@@ -71,6 +77,11 @@ pub enum IrExpr {
     Compare {
         left: Box<IrExpr>,
         op: IrCompareOp,
+        right: Box<IrExpr>,
+    },
+    Logical {
+        left: Box<IrExpr>,
+        op: IrLogicalOp,
         right: Box<IrExpr>,
     },
     Call {
@@ -185,6 +196,10 @@ fn lower_reference_path(reference: &str) -> Vec<String> {
 fn lower_expression(expression: &str) -> IrExpr {
     let expression = expression.trim();
 
+    if let Some(logical) = lower_logical_expression(expression) {
+        return logical;
+    }
+
     if let Some(compare) = lower_compare_expression(expression) {
         return compare;
     }
@@ -235,6 +250,24 @@ fn lower_binary_expression(expression: &str) -> Option<IrExpr> {
                 _ => unreachable!("unexpected operator"),
             };
             return Some(IrExpr::Binary {
+                left: Box::new(lower_expression(&left)),
+                op,
+                right: Box::new(lower_expression(&right)),
+            });
+        }
+    }
+    None
+}
+
+fn lower_logical_expression(expression: &str) -> Option<IrExpr> {
+    for operators in [&["or"][..], &["and"][..]] {
+        if let Some((left, operator, right)) = split_top_level_operator(expression, operators) {
+            let op = match operator.as_str() {
+                "and" => IrLogicalOp::And,
+                "or" => IrLogicalOp::Or,
+                _ => unreachable!("unexpected logical operator"),
+            };
+            return Some(IrExpr::Logical {
                 left: Box::new(lower_expression(&left)),
                 op,
                 right: Box::new(lower_expression(&right)),
@@ -299,6 +332,26 @@ fn split_top_level_operator(
             if &expression[index..index + op_len] != *operator {
                 continue;
             }
+
+            let before = if index == 0 {
+                None
+            } else {
+                expression[..index].chars().last()
+            };
+            let after = if index + op_len >= expression.len() {
+                None
+            } else {
+                expression[index + op_len..].chars().next()
+            };
+            let operator_is_word = operator.chars().all(|ch| ch.is_ascii_alphabetic());
+            if operator_is_word {
+                if before.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                    || after.is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                {
+                    continue;
+                }
+            }
+
             if index == 0 {
                 continue;
             }
@@ -589,6 +642,12 @@ fn render_expression(expression: &IrExpr) -> String {
             render_compare_op(op),
             render_expression_with_precedence(right, compare_precedence() + 1)
         ),
+        IrExpr::Logical { left, op, right } => format!(
+            "{} {} {}",
+            render_expression_with_precedence(left, logical_precedence(op)),
+            render_logical_op(op),
+            render_expression_with_precedence(right, logical_precedence(op) + 1)
+        ),
         IrExpr::Call { callee, arguments } => format!(
             "{}({})",
             callee.join("."),
@@ -608,6 +667,9 @@ fn render_expression_with_precedence(expression: &IrExpr, parent_precedence: u8)
             format!("({})", render_expression(expression))
         }
         IrExpr::Compare { .. } if compare_precedence() < parent_precedence => {
+            format!("({})", render_expression(expression))
+        }
+        IrExpr::Logical { op, .. } if logical_precedence(op) < parent_precedence => {
             format!("({})", render_expression(expression))
         }
         _ => render_expression(expression),
@@ -633,6 +695,13 @@ fn render_compare_op(op: &IrCompareOp) -> &'static str {
     }
 }
 
+fn render_logical_op(op: &IrLogicalOp) -> &'static str {
+    match op {
+        IrLogicalOp::And => "and",
+        IrLogicalOp::Or => "or",
+    }
+}
+
 fn binary_precedence(op: &IrBinaryOp) -> u8 {
     match op {
         IrBinaryOp::Add | IrBinaryOp::Subtract => 1,
@@ -644,13 +713,20 @@ fn compare_precedence() -> u8 {
     0
 }
 
+fn logical_precedence(op: &IrLogicalOp) -> u8 {
+    match op {
+        IrLogicalOp::Or => 0,
+        IrLogicalOp::And => 1,
+    }
+}
+
 fn indent_text(indent: usize) -> String {
     "    ".repeat(indent)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{lower_source_file, render_program, IrBinaryOp, IrCompareOp, IrExpr};
+    use super::{lower_source_file, render_program, IrBinaryOp, IrCompareOp, IrExpr, IrLogicalOp};
     use crate::parser::parse_source;
     use crate::typecheck::validate_source_file;
 
@@ -818,6 +894,42 @@ define function main takes score as integer, bonus as integer, limit as integer 
                         }),
                         op: IrCompareOp::LessEqual,
                         right: Box::new(IrExpr::Reference(vec!["limit".to_string()])),
+                    })
+                );
+            }
+            other => panic!("expected return statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_boolean_expressions_over_comparisons() {
+        let source = r#"module demo.ir_logic
+
+define function main takes score as integer, limit as integer, ready as boolean returns boolean
+    return score < limit and ready
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let program = lower_source_file(&file);
+
+        let function = match &program.declarations[0] {
+            super::IrDeclaration::Function(function) => function,
+            other => panic!("expected function declaration, got {other:?}"),
+        };
+
+        match &function.body[0] {
+            super::IrStatement::Return { value } => {
+                assert_eq!(
+                    value,
+                    &Some(IrExpr::Logical {
+                        left: Box::new(IrExpr::Compare {
+                            left: Box::new(IrExpr::Reference(vec!["score".to_string()])),
+                            op: IrCompareOp::Less,
+                            right: Box::new(IrExpr::Reference(vec!["limit".to_string()])),
+                        }),
+                        op: IrLogicalOp::And,
+                        right: Box::new(IrExpr::Reference(vec!["ready".to_string()])),
                     })
                 );
             }

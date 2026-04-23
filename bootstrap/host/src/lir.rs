@@ -40,6 +40,9 @@ pub enum LinearInstruction {
     LogicalOr,
     StoreLocal(String),
     StoreReference(Vec<String>),
+    Label(String),
+    Jump(String),
+    JumpIfFalse(String),
     Pop,
     Return,
 }
@@ -57,10 +60,31 @@ pub fn lower_program(program: &IrProgram) -> Result<LinearProgram, String> {
     Ok(LinearProgram { functions })
 }
 
+struct LoweringContext {
+    function_name: String,
+    next_label_id: usize,
+}
+
+impl LoweringContext {
+    fn new(function_name: &str) -> Self {
+        Self {
+            function_name: function_name.to_string(),
+            next_label_id: 0,
+        }
+    }
+
+    fn fresh_label(&mut self, prefix: &str) -> String {
+        let label = format!("{}_{}_{}", self.function_name, prefix, self.next_label_id);
+        self.next_label_id += 1;
+        label
+    }
+}
+
 fn lower_function(function: &crate::ir::IrFunction) -> Result<LinearFunction, String> {
     let mut instructions = Vec::new();
+    let mut context = LoweringContext::new(&function.name);
     for statement in &function.body {
-        lower_statement(statement, &mut instructions)?;
+        lower_statement(statement, &mut instructions, &mut context)?;
     }
 
     Ok(LinearFunction {
@@ -72,6 +96,7 @@ fn lower_function(function: &crate::ir::IrFunction) -> Result<LinearFunction, St
 fn lower_statement(
     statement: &IrStatement,
     instructions: &mut Vec<LinearInstruction>,
+    context: &mut LoweringContext,
 ) -> Result<(), String> {
     match statement {
         IrStatement::Let { name, value } | IrStatement::Mutable { name, value, .. } => {
@@ -82,6 +107,39 @@ fn lower_statement(
             lower_expression(value, instructions)?;
             instructions.push(LinearInstruction::StoreReference(target.clone()));
         }
+        IrStatement::If {
+            condition,
+            then_body,
+            else_body,
+        } => {
+            let else_label = context.fresh_label("if_else");
+            let end_label = context.fresh_label("if_end");
+
+            lower_expression(condition, instructions)?;
+            instructions.push(LinearInstruction::JumpIfFalse(else_label.clone()));
+            for nested in then_body {
+                lower_statement(nested, instructions, context)?;
+            }
+            instructions.push(LinearInstruction::Jump(end_label.clone()));
+            instructions.push(LinearInstruction::Label(else_label));
+            for nested in else_body {
+                lower_statement(nested, instructions, context)?;
+            }
+            instructions.push(LinearInstruction::Label(end_label));
+        }
+        IrStatement::RepeatWhile { condition, body } => {
+            let start_label = context.fresh_label("loop_start");
+            let end_label = context.fresh_label("loop_end");
+
+            instructions.push(LinearInstruction::Label(start_label.clone()));
+            lower_expression(condition, instructions)?;
+            instructions.push(LinearInstruction::JumpIfFalse(end_label.clone()));
+            for nested in body {
+                lower_statement(nested, instructions, context)?;
+            }
+            instructions.push(LinearInstruction::Jump(start_label));
+            instructions.push(LinearInstruction::Label(end_label));
+        }
         IrStatement::Return { value } => {
             if let Some(value) = value {
                 lower_expression(value, instructions)?;
@@ -91,9 +149,6 @@ fn lower_statement(
         IrStatement::Expr { value } => {
             lower_expression(value, instructions)?;
             instructions.push(LinearInstruction::Pop);
-        }
-        IrStatement::If { .. } | IrStatement::RepeatWhile { .. } => {
-            return Err("control-flow lowering not implemented yet".to_string())
         }
     }
 
@@ -170,7 +225,7 @@ fn lower_expression(
 
 #[cfg(test)]
 mod tests {
-    use super::{lower_program, LinearInstruction, LinearProgram};
+    use super::{lower_program, LinearFunction, LinearInstruction, LinearProgram};
     use crate::ir::lower_source_file;
     use crate::parser::parse_source;
     use crate::typecheck::validate_source_file;
@@ -191,7 +246,7 @@ define function main takes score as integer, bonus as integer, limit as integer,
         assert_eq!(
             linear,
             LinearProgram {
-                functions: vec![super::LinearFunction {
+                functions: vec![LinearFunction {
                     name: "main".to_string(),
                     instructions: vec![
                         LinearInstruction::LoadReference(vec!["score".to_string()]),
@@ -203,6 +258,84 @@ define function main takes score as integer, bonus as integer, limit as integer,
                         LinearInstruction::CompareLessEqual,
                         LinearInstruction::LoadReference(vec!["ready".to_string()]),
                         LinearInstruction::LogicalAnd,
+                        LinearInstruction::Return,
+                    ],
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn lowers_if_else_to_labels_and_jumps() {
+        let source = r#"module demo.lir
+
+define function main takes ready as boolean returns integer
+    if ready
+        return 1
+    else
+        return 2
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let ir = lower_source_file(&file);
+        let linear = lower_program(&ir).expect("linear lowering should succeed");
+
+        assert_eq!(
+            linear,
+            LinearProgram {
+                functions: vec![LinearFunction {
+                    name: "main".to_string(),
+                    instructions: vec![
+                        LinearInstruction::LoadReference(vec!["ready".to_string()]),
+                        LinearInstruction::JumpIfFalse("main_if_else_0".to_string()),
+                        LinearInstruction::LoadInteger(1),
+                        LinearInstruction::Return,
+                        LinearInstruction::Jump("main_if_end_1".to_string()),
+                        LinearInstruction::Label("main_if_else_0".to_string()),
+                        LinearInstruction::LoadInteger(2),
+                        LinearInstruction::Return,
+                        LinearInstruction::Label("main_if_end_1".to_string()),
+                    ],
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn lowers_repeat_while_to_loop_labels_and_jumps() {
+        let source = r#"module demo.lir
+
+define function main takes ready as boolean returns integer
+    mutable score as integer be 0
+    repeat while ready
+        set score to score + 1
+    return score
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let ir = lower_source_file(&file);
+        let linear = lower_program(&ir).expect("linear lowering should succeed");
+
+        assert_eq!(
+            linear,
+            LinearProgram {
+                functions: vec![LinearFunction {
+                    name: "main".to_string(),
+                    instructions: vec![
+                        LinearInstruction::LoadInteger(0),
+                        LinearInstruction::StoreLocal("score".to_string()),
+                        LinearInstruction::Label("main_loop_start_0".to_string()),
+                        LinearInstruction::LoadReference(vec!["ready".to_string()]),
+                        LinearInstruction::JumpIfFalse("main_loop_end_1".to_string()),
+                        LinearInstruction::LoadReference(vec!["score".to_string()]),
+                        LinearInstruction::LoadInteger(1),
+                        LinearInstruction::Add,
+                        LinearInstruction::StoreReference(vec!["score".to_string()]),
+                        LinearInstruction::Jump("main_loop_start_0".to_string()),
+                        LinearInstruction::Label("main_loop_end_1".to_string()),
+                        LinearInstruction::LoadReference(vec!["score".to_string()]),
                         LinearInstruction::Return,
                     ],
                 }],

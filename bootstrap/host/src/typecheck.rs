@@ -25,6 +25,17 @@ pub fn validate_source_file(file: &SourceFile) -> Result<(), String> {
                 if !seen_declarations.insert(format!("record:{}", record.name)) {
                     return Err(format!("duplicate record declaration: {}", record.name));
                 }
+
+                let mut seen_fields = HashSet::new();
+                for field in &record.fields {
+                    if !seen_fields.insert(field.name.clone()) {
+                        return Err(format!(
+                            "duplicate field `{}` in record `{}`",
+                            field.name, record.name
+                        ));
+                    }
+                }
+
                 known_types.insert(record.name.clone());
                 record_fields.insert(
                     record.name.clone(),
@@ -77,8 +88,15 @@ fn validate_function(
     functions: &HashMap<String, FunctionSignature>,
 ) -> Result<(), String> {
     let mut scope = HashMap::new();
+    let mut seen_parameters = HashSet::new();
     for parameter in &function.parameters {
         ensure_known_type(known_types, &parameter.parameter_type.name)?;
+        if !seen_parameters.insert(parameter.name.clone()) {
+            return Err(format!(
+                "duplicate parameter `{}` in function `{}`",
+                parameter.name, function.name
+            ));
+        }
         scope.insert(
             parameter.name.clone(),
             parameter.parameter_type.name.clone(),
@@ -820,6 +838,36 @@ define function broken takes value as mystery_type returns integer
         let file = parse_source(source).expect("source should parse");
         let error = validate_source_file(&file).expect_err("unknown type should fail");
         assert!(error.contains("mystery_type"));
+    }
+
+    #[test]
+    fn rejects_duplicate_record_fields() {
+        let source = r#"module demo.duplicate_record_fields
+
+define record entity
+    id as integer
+    id as integer
+
+define function main returns integer
+    return 0
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        let error = validate_source_file(&file).expect_err("duplicate record field should fail");
+        assert!(error.contains("duplicate field `id` in record `entity`"));
+    }
+
+    #[test]
+    fn rejects_duplicate_function_parameters() {
+        let source = r#"module demo.duplicate_parameters
+
+define function main takes value as integer, value as integer returns integer
+    return value
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        let error = validate_source_file(&file).expect_err("duplicate parameter should fail");
+        assert!(error.contains("duplicate parameter `value` in function `main`"));
     }
 
     #[test]

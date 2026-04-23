@@ -395,6 +395,19 @@ fn try_render_immediate_local_integer_update(
             }
             _ => None,
         },
+        LinearInstruction::Divide => match instructions.get(instruction_index + 3) {
+            Some(LinearInstruction::StoreReference(target))
+                if target.len() == 1 && target[0] == path[0] =>
+            {
+                let offset = *local_offsets.get(&path[0])?;
+                writeln!(output, "    mov rax, {value}").unwrap();
+                writeln!(output, "    cqo").unwrap();
+                writeln!(output, "    idiv qword [rbp-{offset}]").unwrap();
+                writeln!(output, "    mov qword [rbp-{offset}], rax").unwrap();
+                Some(3)
+            }
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -721,6 +734,34 @@ define function main returns integer
         assert!(native.contains("    mov rax, qword [rbp-8]"));
         assert!(!native.contains("store_pop score"));
         assert!(!native.contains("sub_pop"));
+    }
+
+    #[test]
+    fn lowers_integer_divided_by_local_updates_into_stack_slots() {
+        let source = r#"module demo.native
+
+define function main returns integer
+    mutable score as integer be 2
+    set score to 10 / score
+    return score
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let ir = lower_source_file(&file);
+        let linear = lower_program(&ir).expect("linear lowering should succeed");
+        let native =
+            render_program(&linear, "linux-x86_64").expect("native rendering should succeed");
+
+        assert!(native.contains("    sub rsp, 8"));
+        assert!(native.contains("    mov qword [rbp-8], 2"));
+        assert!(native.contains("    mov rax, 10"));
+        assert!(native.contains("    cqo"));
+        assert!(native.contains("    idiv qword [rbp-8]"));
+        assert!(native.contains("    mov qword [rbp-8], rax"));
+        assert!(native.contains("    mov rax, qword [rbp-8]"));
+        assert!(!native.contains("store_pop score"));
+        assert!(!native.contains("div_pop"));
     }
 
     #[test]

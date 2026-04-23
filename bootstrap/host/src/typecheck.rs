@@ -137,6 +137,7 @@ fn validate_statements(
             Statement::Let { name, value } => {
                 let value_type =
                     validate_expression(value, scope, known_types, record_fields, functions)?;
+                ensure_variable_not_declared(scope, function_name, name)?;
                 scope.insert(name.clone(), value_type);
                 false
             }
@@ -153,6 +154,7 @@ fn validate_statements(
                     &actual_type,
                     &format!("variable `{name}` declared as"),
                 )?;
+                ensure_variable_not_declared(scope, function_name, name)?;
                 scope.insert(name.clone(), value_type.name.clone());
                 false
             }
@@ -324,6 +326,20 @@ fn ensure_type_matches(expected: &str, actual: &str, context: &str) -> Result<()
         Ok(())
     } else {
         Err(format!("{context} `{expected}`, got `{actual}`"))
+    }
+}
+
+fn ensure_variable_not_declared(
+    scope: &HashMap<String, String>,
+    function_name: &str,
+    variable_name: &str,
+) -> Result<(), String> {
+    if scope.contains_key(variable_name) {
+        Err(format!(
+            "duplicate variable `{variable_name}` in function `{function_name}`"
+        ))
+    } else {
+        Ok(())
     }
 }
 
@@ -891,6 +907,35 @@ define function main returns integer
         let error =
             validate_source_file(&file).expect_err("duplicate constructor field should fail");
         assert!(error.contains("duplicate constructor field `id` for record `entity`"));
+    }
+
+    #[test]
+    fn rejects_duplicate_local_variable_declarations() {
+        let source = r#"module demo.duplicate_local
+
+define function main returns integer
+    let score be 1
+    let score be 2
+    return score
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        let error = validate_source_file(&file).expect_err("duplicate local should fail");
+        assert!(error.contains("duplicate variable `score` in function `main`"));
+    }
+
+    #[test]
+    fn rejects_redeclaring_function_parameters_as_locals() {
+        let source = r#"module demo.parameter_shadow
+
+define function main takes score as integer returns integer
+    mutable score as integer be score + 1
+    return score
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        let error = validate_source_file(&file).expect_err("parameter shadow should fail");
+        assert!(error.contains("duplicate variable `score` in function `main`"));
     }
 
     #[test]

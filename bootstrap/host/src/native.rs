@@ -743,7 +743,7 @@ fn try_render_local_compute_call(
         Some(LinearInstruction::LoadInteger(value)) => *value,
         _ => return None,
     };
-    let (mnemonic, callee) = match (
+    let (op, callee) = match (
         instructions.get(instruction_index + 2)?,
         instructions.get(instruction_index + 3)?,
     ) {
@@ -753,14 +753,25 @@ fn try_render_local_compute_call(
                 callee,
                 argument_count: 1,
             },
-        ) if callee.len() == 1 && user_functions.contains(&callee[0]) => {
-            (arithmetic_mnemonic(instruction)?, callee)
-        }
+        ) if callee.len() == 1 && user_functions.contains(&callee[0]) => (instruction, callee),
         _ => return None,
     };
 
-    writeln!(output, "    mov rdi, qword [rbp-{offset}]").unwrap();
-    writeln!(output, "    {mnemonic} rdi, {value}").unwrap();
+    match op {
+        instruction if arithmetic_mnemonic(instruction).is_some() => {
+            let mnemonic = arithmetic_mnemonic(instruction).expect("mnemonic should exist");
+            writeln!(output, "    mov rdi, qword [rbp-{offset}]").unwrap();
+            writeln!(output, "    {mnemonic} rdi, {value}").unwrap();
+        }
+        LinearInstruction::Divide => {
+            writeln!(output, "    mov rax, qword [rbp-{offset}]").unwrap();
+            writeln!(output, "    cqo").unwrap();
+            writeln!(output, "    mov rcx, {value}").unwrap();
+            writeln!(output, "    idiv rcx").unwrap();
+            writeln!(output, "    mov rdi, rax").unwrap();
+        }
+        _ => return None,
+    }
     writeln!(output, "    call {}", native_symbol_name(&callee.join("."))).unwrap();
     Some(3)
 }
@@ -1138,6 +1149,37 @@ define function main returns integer
         assert!(native.contains("    call helper"));
         assert!(!native.contains("load n"));
         assert!(!native.contains("mul_pop"));
+    }
+
+    #[test]
+    fn lowers_divided_single_argument_user_calls() {
+        let source = r#"module demo.native
+
+define function helper takes value as integer returns integer
+    return value
+
+define function main returns integer
+    mutable n as integer be 8
+    return helper(n / 2)
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let ir = lower_source_file(&file);
+        let linear = lower_program(&ir).expect("linear lowering should succeed");
+        let native =
+            render_program(&linear, "linux-x86_64").expect("native rendering should succeed");
+
+        assert!(native.contains("main:"));
+        assert!(native.contains("    mov qword [rbp-8], 8"));
+        assert!(native.contains("    mov rax, qword [rbp-8]"));
+        assert!(native.contains("    cqo"));
+        assert!(native.contains("    mov rcx, 2"));
+        assert!(native.contains("    idiv rcx"));
+        assert!(native.contains("    mov rdi, rax"));
+        assert!(native.contains("    call helper"));
+        assert!(!native.contains("load n"));
+        assert!(!native.contains("div_pop"));
     }
 
     #[test]

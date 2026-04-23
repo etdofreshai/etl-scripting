@@ -315,6 +315,10 @@ fn integer_argument_register(index: usize) -> Option<&'static str> {
 
 fn collect_local_offsets(function: &LinearFunction) -> BTreeMap<String, usize> {
     let mut offsets = BTreeMap::new();
+    for parameter_name in &function.parameter_names {
+        let next_offset = (offsets.len() + 1) * 8;
+        offsets.entry(parameter_name.clone()).or_insert(next_offset);
+    }
     for instruction in &function.instructions {
         match instruction {
             LinearInstruction::StoreLocal(name) => {
@@ -787,6 +791,41 @@ define function main returns integer
         assert!(!native.contains("push_int 5"));
         assert!(!native.contains("load left"));
         assert!(!native.contains("load right"));
+    }
+
+    #[test]
+    fn lowers_three_integer_argument_user_calls() {
+        let source = r#"module demo.native
+
+define function helper takes first as integer, second as integer, third as integer returns integer
+    return third
+
+define function main returns integer
+    return helper(7, 5, 3)
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let ir = lower_source_file(&file);
+        let linear = lower_program(&ir).expect("linear lowering should succeed");
+        let native =
+            render_program(&linear, "linux-x86_64").expect("native rendering should succeed");
+
+        assert!(native.contains("helper:"));
+        assert!(native.contains("    sub rsp, 24"));
+        assert!(native.contains("    mov qword [rbp-8], rdi"));
+        assert!(native.contains("    mov qword [rbp-16], rsi"));
+        assert!(native.contains("    mov qword [rbp-24], rdx"));
+        assert!(native.contains("    mov rax, qword [rbp-24]"));
+        assert!(native.contains("main:"));
+        assert!(native.contains("    mov rdi, 7"));
+        assert!(native.contains("    mov rsi, 5"));
+        assert!(native.contains("    mov rdx, 3"));
+        assert!(native.contains("    call helper"));
+        assert!(!native.contains("push_int 7"));
+        assert!(!native.contains("push_int 5"));
+        assert!(!native.contains("push_int 3"));
+        assert!(!native.contains("load third"));
     }
 
     #[test]

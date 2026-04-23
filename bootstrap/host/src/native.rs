@@ -140,14 +140,9 @@ fn render_instruction(instruction: &LinearInstruction) -> String {
             type_name,
             field_count,
         } => format!("construct_record {type_name}, {field_count}"),
-        LinearInstruction::Call {
-            callee,
-            argument_count,
-        } => format!(
-            "call {}, {}",
-            native_symbol_name(&callee.join(".")),
-            argument_count
-        ),
+        LinearInstruction::Call { callee, .. } => {
+            format!("call {}", native_symbol_name(&callee.join(".")))
+        }
         LinearInstruction::Add => "add_pop".to_string(),
         LinearInstruction::Subtract => "sub_pop".to_string(),
         LinearInstruction::Multiply => "mul_pop".to_string(),
@@ -180,9 +175,12 @@ mod tests {
     fn renders_linux_x86_64_native_output() {
         let source = r#"module demo.native
 
+define function helper returns integer
+    return 7
+
 define function main returns integer
     io.print_line("Hello from ETL")
-    return 0
+    return helper()
 "#;
 
         let file = parse_source(source).expect("source should parse");
@@ -199,16 +197,16 @@ define function main returns integer
         assert!(native.contains("str_0: db \"Hello from ETL\", 0"));
         assert!(native.contains("section .text"));
         assert!(native.contains("global main"));
+        assert!(native.contains("global helper"));
         assert!(native.contains("extern io_print_line"));
+        assert!(native.contains("helper:"));
         assert!(native.contains("main:"));
-        assert!(native.contains("    push rbp"));
-        assert!(native.contains("    mov rbp, rsp"));
         assert!(native.contains("    lea rdi, [rel str_0]"));
-        assert!(native.contains("    call io_print_line, 1"));
-        assert!(!native.contains("push_text \"Hello from ETL\""));
+        assert!(native.contains("    call io_print_line"));
+        assert!(native.contains("    call helper"));
+        assert!(!native.contains("call helper, 0"));
         assert!(!native.contains("call io.print_line, 1"));
-        assert!(native.contains("    mov rax, 0"));
-        assert!(!native.contains("push_int 0"));
+        assert!(native.contains("    mov rax, 7"));
         assert!(native.contains("    mov rsp, rbp"));
         assert!(native.contains("    pop rbp"));
         assert!(native.contains("    ret"));

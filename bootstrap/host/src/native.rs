@@ -41,8 +41,17 @@ fn render_linux_x86_64(program: &LinearProgram) -> String {
         writeln!(&mut output, "    push rbp").unwrap();
         writeln!(&mut output, "    mov rbp, rsp").unwrap();
 
-        for instruction in &function.instructions {
-            match instruction {
+        let mut instruction_index = 0;
+        while instruction_index < function.instructions.len() {
+            match &function.instructions[instruction_index] {
+                LinearInstruction::LoadInteger(value)
+                    if matches!(
+                        function.instructions.get(instruction_index + 1),
+                        Some(LinearInstruction::Return)
+                    ) =>
+                {
+                    writeln!(&mut output, "    mov rax, {value}").unwrap();
+                }
                 LinearInstruction::Label(name) => writeln!(&mut output, "{}:", name).unwrap(),
                 LinearInstruction::Return => {
                     writeln!(&mut output, "    mov rsp, rbp").unwrap();
@@ -51,6 +60,7 @@ fn render_linux_x86_64(program: &LinearProgram) -> String {
                 }
                 other => writeln!(&mut output, "    {}", render_instruction(other)).unwrap(),
             }
+            instruction_index += 1;
         }
     }
 
@@ -140,6 +150,8 @@ define function main returns integer
         assert!(native.contains("    push rbp"));
         assert!(native.contains("    mov rbp, rsp"));
         assert!(native.contains("    call io.print_line, 1"));
+        assert!(native.contains("    mov rax, 0"));
+        assert!(!native.contains("push_int 0"));
         assert!(native.contains("    mov rsp, rbp"));
         assert!(native.contains("    pop rbp"));
         assert!(native.contains("    ret"));

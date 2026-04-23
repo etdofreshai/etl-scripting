@@ -169,5 +169,7 @@ fn cli_compile_to_native_linux_x86_64_prints_targeted_backend_output() {
     assert!(stdout.contains("global main"));
     assert!(stdout.contains("    push rbp"));
     assert!(stdout.contains("    mov rbp, rsp"));
+    assert!(stdout.contains("    mov rax, 0"));
+    assert!(!stdout.contains("push_int 0"));
     assert!(stdout.contains("    ret"));
 }

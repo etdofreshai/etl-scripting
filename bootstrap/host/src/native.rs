@@ -72,13 +72,10 @@ fn render_linux_x86_64(program: &LinearProgram) -> String {
                 LinearInstruction::LoadInteger(_)
                     if matches!(
                         function.instructions.get(instruction_index + 1),
-                        Some(LinearInstruction::Call {
-                            argument_count: 1,
-                            ..
-                        })
+                        Some(LinearInstruction::Call { .. })
                     ) =>
                 {
-                    if let Some(consumed) = try_render_single_integer_call(
+                    if let Some(consumed) = try_render_integer_immediate_call(
                         &mut output,
                         &user_functions,
                         &function.instructions,
@@ -100,7 +97,14 @@ fn render_linux_x86_64(program: &LinearProgram) -> String {
                         Some(LinearInstruction::LoadInteger(_))
                     ) =>
                 {
-                    if let Some(consumed) = try_render_integer_local_initializer(
+                    if let Some(consumed) = try_render_integer_immediate_call(
+                        &mut output,
+                        &user_functions,
+                        &function.instructions,
+                        instruction_index,
+                    ) {
+                        instruction_index += consumed;
+                    } else if let Some(consumed) = try_render_integer_local_initializer(
                         &mut output,
                         &local_offsets,
                         &function.instructions,
@@ -147,6 +151,29 @@ fn render_linux_x86_64(program: &LinearProgram) -> String {
                     } else if let Some(consumed) = try_render_immediate_local_integer_update(
                         &mut output,
                         &local_offsets,
+                        &function.instructions,
+                        instruction_index,
+                    ) {
+                        instruction_index += consumed;
+                    } else {
+                        writeln!(
+                            &mut output,
+                            "    {}",
+                            render_instruction(&function.instructions[instruction_index])
+                        )
+                        .unwrap();
+                    }
+                }
+                LinearInstruction::LoadReference(path)
+                    if matches!(
+                        function.instructions.get(instruction_index + 1),
+                        Some(LinearInstruction::LoadReference(other_path)) if other_path.len() == 1
+                    ) && path.len() == 1 =>
+                {
+                    if let Some(consumed) = try_render_local_binary_return(
+                        &mut output,
+                        &local_offsets,
+                        path,
                         &function.instructions,
                         instruction_index,
                     ) {
@@ -346,27 +373,66 @@ fn try_render_local_compare_branch(
     Some(3)
 }
 
-fn try_render_single_integer_call(
+fn try_render_local_binary_return(
+    output: &mut String,
+    local_offsets: &BTreeMap<String, usize>,
+    path: &[String],
+    instructions: &[LinearInstruction],
+    instruction_index: usize,
+) -> Option<usize> {
+    let left_offset = *local_offsets.get(&path[0])?;
+    let right_path = match instructions.get(instruction_index + 1) {
+        Some(LinearInstruction::LoadReference(path)) if path.len() == 1 => path,
+        _ => return None,
+    };
+    let right_offset = *local_offsets.get(&right_path[0])?;
+
+    match (
+        instructions.get(instruction_index + 2)?,
+        instructions.get(instruction_index + 3)?,
+    ) {
+        (LinearInstruction::Add, LinearInstruction::Return) => {
+            writeln!(output, "    mov rax, qword [rbp-{left_offset}]").unwrap();
+            writeln!(output, "    add rax, qword [rbp-{right_offset}]").unwrap();
+            Some(3)
+        }
+        _ => None,
+    }
+}
+
+fn try_render_integer_immediate_call(
     output: &mut String,
     user_functions: &[String],
     instructions: &[LinearInstruction],
     instruction_index: usize,
 ) -> Option<usize> {
-    let value = match instructions.get(instruction_index) {
-        Some(LinearInstruction::LoadInteger(value)) => *value,
-        _ => return None,
-    };
-    let callee = match instructions.get(instruction_index + 1) {
+    let mut values = Vec::new();
+    let mut cursor = instruction_index;
+
+    while let Some(LinearInstruction::LoadInteger(value)) = instructions.get(cursor) {
+        values.push(*value);
+        cursor += 1;
+    }
+
+    let callee = match instructions.get(cursor) {
         Some(LinearInstruction::Call {
             callee,
-            argument_count: 1,
-        }) if callee.len() == 1 && user_functions.contains(&callee[0]) => callee,
+            argument_count,
+        }) if *argument_count == values.len()
+            && callee.len() == 1
+            && user_functions.contains(&callee[0]) =>
+        {
+            callee
+        }
         _ => return None,
     };
 
-    writeln!(output, "    mov rdi, {value}").unwrap();
+    for (index, value) in values.iter().enumerate() {
+        let register = integer_argument_register(index)?;
+        writeln!(output, "    mov {register}, {value}").unwrap();
+    }
     writeln!(output, "    call {}", native_symbol_name(&callee.join("."))).unwrap();
-    Some(1)
+    Some(values.len())
 }
 
 fn try_render_integer_local_initializer(
@@ -689,6 +755,38 @@ define function main returns integer
         assert!(native.contains("    call helper"));
         assert!(!native.contains("push_int 7"));
         assert!(!native.contains("load value"));
+    }
+
+    #[test]
+    fn lowers_two_integer_argument_user_calls() {
+        let source = r#"module demo.native
+
+define function helper takes left as integer, right as integer returns integer
+    return left + right
+
+define function main returns integer
+    return helper(7, 5)
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let ir = lower_source_file(&file);
+        let linear = lower_program(&ir).expect("linear lowering should succeed");
+        let native =
+            render_program(&linear, "linux-x86_64").expect("native rendering should succeed");
+
+        assert!(native.contains("helper:"));
+        assert!(native.contains("    sub rsp, 16"));
+        assert!(native.contains("    mov qword [rbp-8], rdi"));
+        assert!(native.contains("    mov qword [rbp-16], rsi"));
+        assert!(native.contains("main:"));
+        assert!(native.contains("    mov rdi, 7"));
+        assert!(native.contains("    mov rsi, 5"));
+        assert!(native.contains("    call helper"));
+        assert!(!native.contains("push_int 7"));
+        assert!(!native.contains("push_int 5"));
+        assert!(!native.contains("load left"));
+        assert!(!native.contains("load right"));
     }
 
     #[test]

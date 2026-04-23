@@ -108,17 +108,17 @@ fn render_instruction(
             };
             format!("{opcode} {callee_name}, {argument_count}")
         }
-        LinearInstruction::Add => "add".to_string(),
-        LinearInstruction::Subtract => "sub".to_string(),
-        LinearInstruction::Multiply => "mul".to_string(),
-        LinearInstruction::Divide => "div".to_string(),
-        LinearInstruction::CompareEqual => "cmp_eq".to_string(),
-        LinearInstruction::CompareLess => "cmp_lt".to_string(),
-        LinearInstruction::CompareGreater => "cmp_gt".to_string(),
-        LinearInstruction::CompareLessEqual => "cmp_le".to_string(),
-        LinearInstruction::CompareGreaterEqual => "cmp_ge".to_string(),
-        LinearInstruction::LogicalAnd => "and".to_string(),
-        LinearInstruction::LogicalOr => "or".to_string(),
+        LinearInstruction::Add => "add_pop".to_string(),
+        LinearInstruction::Subtract => "sub_pop".to_string(),
+        LinearInstruction::Multiply => "mul_pop".to_string(),
+        LinearInstruction::Divide => "div_pop".to_string(),
+        LinearInstruction::CompareEqual => "cmp_eq_pop".to_string(),
+        LinearInstruction::CompareLess => "cmp_lt_pop".to_string(),
+        LinearInstruction::CompareGreater => "cmp_gt_pop".to_string(),
+        LinearInstruction::CompareLessEqual => "cmp_le_pop".to_string(),
+        LinearInstruction::CompareGreaterEqual => "cmp_ge_pop".to_string(),
+        LinearInstruction::LogicalAnd => "and_pop".to_string(),
+        LinearInstruction::LogicalOr => "or_pop".to_string(),
         LinearInstruction::StoreLocal(name) => format!("store_local_pop {name}"),
         LinearInstruction::StoreReference(path) => format!("store_pop {}", path.join(".")),
         LinearInstruction::Jump(name) => format!("jmp {name}"),
@@ -228,5 +228,25 @@ define function main returns integer
         assert!(asm.contains("    store_local_pop score"));
         assert!(asm.contains("    store_pop score"));
         assert!(asm.contains("    return_value"));
+    }
+
+    #[test]
+    fn renders_expression_ops_with_stack_effect_suffixes() {
+        let source = r#"module demo.asm
+
+define function main takes score as integer, bonus as integer, limit as integer, ready as boolean returns boolean
+    return score + bonus * 2 <= limit and ready
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let ir = lower_source_file(&file);
+        let linear = lower_program(&ir).expect("linear lowering should succeed");
+        let asm = render_program(&linear);
+
+        assert!(asm.contains("    mul_pop"));
+        assert!(asm.contains("    add_pop"));
+        assert!(asm.contains("    cmp_le_pop"));
+        assert!(asm.contains("    and_pop"));
     }
 }

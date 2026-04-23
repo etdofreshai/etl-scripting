@@ -205,7 +205,15 @@ fn render_linux_x86_64(program: &LinearProgram) -> String {
                         Some(LinearInstruction::LoadReference(other_path)) if other_path.len() == 1
                     ) && path.len() == 1 =>
                 {
-                    if let Some(consumed) = try_render_local_compare_branch(
+                    if let Some(consumed) = try_render_simple_user_call(
+                        &mut output,
+                        &user_functions,
+                        &local_offsets,
+                        &function.instructions,
+                        instruction_index,
+                    ) {
+                        instruction_index += consumed;
+                    } else if let Some(consumed) = try_render_local_compare_branch(
                         &mut output,
                         &local_offsets,
                         path,
@@ -635,6 +643,11 @@ enum SimpleCallOperand {
         immediate: i64,
         op: CallArithmeticOp,
     },
+    ComputedLocalPair {
+        left_offset: usize,
+        right_offset: usize,
+        op: CallArithmeticOp,
+    },
 }
 
 #[derive(Copy, Clone)]
@@ -668,6 +681,40 @@ fn render_simple_call_operand_into(output: &mut String, operand: &SimpleCallOper
             immediate,
             op,
         } => render_computed_call_operand(output, *offset, *immediate, *op, target),
+        SimpleCallOperand::ComputedLocalPair {
+            left_offset,
+            right_offset,
+            op,
+        } => render_local_pair_call_operand(output, *left_offset, *right_offset, *op, target),
+    }
+}
+
+fn render_local_pair_call_operand(
+    output: &mut String,
+    left_offset: usize,
+    right_offset: usize,
+    op: CallArithmeticOp,
+    target: &str,
+) {
+    match op {
+        CallArithmeticOp::Add => {
+            writeln!(output, "    mov {target}, qword [rbp-{left_offset}]").unwrap();
+            writeln!(output, "    add {target}, qword [rbp-{right_offset}]").unwrap();
+        }
+        CallArithmeticOp::Subtract => {
+            writeln!(output, "    mov {target}, qword [rbp-{left_offset}]").unwrap();
+            writeln!(output, "    sub {target}, qword [rbp-{right_offset}]").unwrap();
+        }
+        CallArithmeticOp::Multiply => {
+            writeln!(output, "    mov {target}, qword [rbp-{left_offset}]").unwrap();
+            writeln!(output, "    imul {target}, qword [rbp-{right_offset}]").unwrap();
+        }
+        CallArithmeticOp::Divide => {
+            writeln!(output, "    mov rax, qword [rbp-{left_offset}]").unwrap();
+            writeln!(output, "    cqo").unwrap();
+            writeln!(output, "    idiv qword [rbp-{right_offset}]").unwrap();
+            writeln!(output, "    mov {target}, rax").unwrap();
+        }
     }
 }
 
@@ -715,6 +762,14 @@ fn push_simple_call_operand(output: &mut String, operand: &SimpleCallOperand) {
             render_computed_call_operand(output, *offset, *immediate, *op, "rax");
             writeln!(output, "    push rax").unwrap();
         }
+        SimpleCallOperand::ComputedLocalPair {
+            left_offset,
+            right_offset,
+            op,
+        } => {
+            render_local_pair_call_operand(output, *left_offset, *right_offset, *op, "rax");
+            writeln!(output, "    push rax").unwrap();
+        }
     }
 }
 
@@ -756,6 +811,19 @@ fn collect_simple_call_operands(
             Some(LinearInstruction::LoadReference(path)) if path.len() == 1 => {
                 let offset = *local_offsets.get(&path[0])?;
                 match (instructions.get(cursor + 1), instructions.get(cursor + 2)) {
+                    (Some(LinearInstruction::LoadReference(other_path)), Some(op_instruction))
+                        if other_path.len() == 1
+                            && call_arithmetic_op(op_instruction).is_some() =>
+                    {
+                        let right_offset = *local_offsets.get(&other_path[0])?;
+                        operands.push(SimpleCallOperand::ComputedLocalPair {
+                            left_offset: offset,
+                            right_offset,
+                            op: call_arithmetic_op(op_instruction)
+                                .expect("checked local pair operand op should exist"),
+                        });
+                        cursor += 3;
+                    }
                     (Some(LinearInstruction::LoadInteger(immediate)), Some(op_instruction))
                         if call_arithmetic_op(op_instruction).is_some() =>
                     {
@@ -1190,6 +1258,37 @@ define function main returns integer
         assert!(native.contains("    add rdi, 1"));
         assert!(native.contains("    call helper"));
         assert!(!native.contains("load n"));
+        assert!(!native.contains("add_pop"));
+    }
+
+    #[test]
+    fn lowers_local_sum_single_argument_user_calls() {
+        let source = r#"module demo.native
+
+define function helper takes value as integer returns integer
+    return value
+
+define function main returns integer
+    mutable n as integer be 5
+    mutable m as integer be 3
+    return helper(n + m)
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let ir = lower_source_file(&file);
+        let linear = lower_program(&ir).expect("linear lowering should succeed");
+        let native =
+            render_program(&linear, "linux-x86_64").expect("native rendering should succeed");
+
+        assert!(native.contains("main:"));
+        assert!(native.contains("    mov qword [rbp-8], 5"));
+        assert!(native.contains("    mov qword [rbp-16], 3"));
+        assert!(native.contains("    mov rdi, qword [rbp-8]"));
+        assert!(native.contains("    add rdi, qword [rbp-16]"));
+        assert!(native.contains("    call helper"));
+        assert!(!native.contains("load n"));
+        assert!(!native.contains("load m"));
         assert!(!native.contains("add_pop"));
     }
 

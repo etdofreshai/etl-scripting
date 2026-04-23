@@ -49,6 +49,15 @@ pub enum IrBinaryOp {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IrCompareOp {
+    Equal,
+    Less,
+    Greater,
+    LessEqual,
+    GreaterEqual,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IrExpr {
     Integer(i64),
     Boolean(bool),
@@ -57,6 +66,11 @@ pub enum IrExpr {
     Binary {
         left: Box<IrExpr>,
         op: IrBinaryOp,
+        right: Box<IrExpr>,
+    },
+    Compare {
+        left: Box<IrExpr>,
+        op: IrCompareOp,
         right: Box<IrExpr>,
     },
     Call {
@@ -171,6 +185,10 @@ fn lower_reference_path(reference: &str) -> Vec<String> {
 fn lower_expression(expression: &str) -> IrExpr {
     let expression = expression.trim();
 
+    if let Some(compare) = lower_compare_expression(expression) {
+        return compare;
+    }
+
     if let Some(binary) = lower_binary_expression(expression) {
         return binary;
     }
@@ -226,7 +244,33 @@ fn lower_binary_expression(expression: &str) -> Option<IrExpr> {
     None
 }
 
+fn lower_compare_expression(expression: &str) -> Option<IrExpr> {
+    let operators = ["==", "<=", ">=", "<", ">"];
+    let (left, operator, right) = split_top_level_operator(expression, &operators)?;
+    let op = match operator.as_str() {
+        "==" => IrCompareOp::Equal,
+        "<=" => IrCompareOp::LessEqual,
+        ">=" => IrCompareOp::GreaterEqual,
+        "<" => IrCompareOp::Less,
+        ">" => IrCompareOp::Greater,
+        _ => unreachable!("unexpected comparison operator"),
+    };
+
+    Some(IrExpr::Compare {
+        left: Box::new(lower_expression(&left)),
+        op,
+        right: Box::new(lower_expression(&right)),
+    })
+}
+
 fn split_top_level_binary(
+    expression: &str,
+    operators: &[&str],
+) -> Option<(String, String, String)> {
+    split_top_level_operator(expression, operators)
+}
+
+fn split_top_level_operator(
     expression: &str,
     operators: &[&str],
 ) -> Option<(String, String, String)> {
@@ -248,18 +292,18 @@ fn split_top_level_binary(
         }
 
         for operator in operators {
-            if operator.len() != 1 {
+            let op_len = operator.len();
+            if index + op_len > expression.len() {
                 continue;
             }
-            let op_char = operator.chars().next().unwrap();
-            if ch != op_char {
+            if &expression[index..index + op_len] != *operator {
                 continue;
             }
             if index == 0 {
                 continue;
             }
             let left = expression[..index].trim();
-            let right = expression[index + 1..].trim();
+            let right = expression[index + op_len..].trim();
             if left.is_empty() || right.is_empty() {
                 continue;
             }
@@ -539,6 +583,12 @@ fn render_expression(expression: &IrExpr) -> String {
             render_binary_op(op),
             render_expression_with_precedence(right, binary_precedence(op) + 1)
         ),
+        IrExpr::Compare { left, op, right } => format!(
+            "{} {} {}",
+            render_expression_with_precedence(left, compare_precedence()),
+            render_compare_op(op),
+            render_expression_with_precedence(right, compare_precedence() + 1)
+        ),
         IrExpr::Call { callee, arguments } => format!(
             "{}({})",
             callee.join("."),
@@ -557,6 +607,9 @@ fn render_expression_with_precedence(expression: &IrExpr, parent_precedence: u8)
         IrExpr::Binary { op, .. } if binary_precedence(op) < parent_precedence => {
             format!("({})", render_expression(expression))
         }
+        IrExpr::Compare { .. } if compare_precedence() < parent_precedence => {
+            format!("({})", render_expression(expression))
+        }
         _ => render_expression(expression),
     }
 }
@@ -570,11 +623,25 @@ fn render_binary_op(op: &IrBinaryOp) -> &'static str {
     }
 }
 
+fn render_compare_op(op: &IrCompareOp) -> &'static str {
+    match op {
+        IrCompareOp::Equal => "==",
+        IrCompareOp::Less => "<",
+        IrCompareOp::Greater => ">",
+        IrCompareOp::LessEqual => "<=",
+        IrCompareOp::GreaterEqual => ">=",
+    }
+}
+
 fn binary_precedence(op: &IrBinaryOp) -> u8 {
     match op {
         IrBinaryOp::Add | IrBinaryOp::Subtract => 1,
         IrBinaryOp::Multiply | IrBinaryOp::Divide => 2,
     }
+}
+
+fn compare_precedence() -> u8 {
+    0
 }
 
 fn indent_text(indent: usize) -> String {
@@ -583,7 +650,7 @@ fn indent_text(indent: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{lower_source_file, render_program, IrBinaryOp, IrExpr};
+    use super::{lower_source_file, render_program, IrBinaryOp, IrCompareOp, IrExpr};
     use crate::parser::parse_source;
     use crate::typecheck::validate_source_file;
 
@@ -711,6 +778,46 @@ define function main takes score as integer, bonus as integer returns integer
                             op: IrBinaryOp::Multiply,
                             right: Box::new(IrExpr::Integer(2)),
                         }),
+                    })
+                );
+            }
+            other => panic!("expected return statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_comparison_expressions_after_arithmetic() {
+        let source = r#"module demo.ir_compare
+
+define function main takes score as integer, bonus as integer, limit as integer returns boolean
+    return score + bonus * 2 <= limit
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let program = lower_source_file(&file);
+
+        let function = match &program.declarations[0] {
+            super::IrDeclaration::Function(function) => function,
+            other => panic!("expected function declaration, got {other:?}"),
+        };
+
+        match &function.body[0] {
+            super::IrStatement::Return { value } => {
+                assert_eq!(
+                    value,
+                    &Some(IrExpr::Compare {
+                        left: Box::new(IrExpr::Binary {
+                            left: Box::new(IrExpr::Reference(vec!["score".to_string()])),
+                            op: IrBinaryOp::Add,
+                            right: Box::new(IrExpr::Binary {
+                                left: Box::new(IrExpr::Reference(vec!["bonus".to_string()])),
+                                op: IrBinaryOp::Multiply,
+                                right: Box::new(IrExpr::Integer(2)),
+                            }),
+                        }),
+                        op: IrCompareOp::LessEqual,
+                        right: Box::new(IrExpr::Reference(vec!["limit".to_string()])),
                     })
                 );
             }

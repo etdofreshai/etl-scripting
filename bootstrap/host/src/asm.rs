@@ -37,7 +37,7 @@ pub fn render_program(program: &LinearProgram) -> String {
                     writeln!(
                         &mut output,
                         "    {}",
-                        render_instruction(other, &function_return_types)
+                        render_instruction(other, &function.return_type, &function_return_types)
                     )
                     .unwrap();
                 }
@@ -85,6 +85,7 @@ fn collect_function_return_types(
 
 fn render_instruction(
     instruction: &LinearInstruction,
+    current_function_return_type: &str,
     function_return_types: &std::collections::HashMap<String, String>,
 ) -> String {
     match instruction {
@@ -118,12 +119,15 @@ fn render_instruction(
         LinearInstruction::CompareGreaterEqual => "cmp_ge".to_string(),
         LinearInstruction::LogicalAnd => "and".to_string(),
         LinearInstruction::LogicalOr => "or".to_string(),
-        LinearInstruction::StoreLocal(name) => format!("store_local {name}"),
-        LinearInstruction::StoreReference(path) => format!("store {}", path.join(".")),
+        LinearInstruction::StoreLocal(name) => format!("store_local_pop {name}"),
+        LinearInstruction::StoreReference(path) => format!("store_pop {}", path.join(".")),
         LinearInstruction::Jump(name) => format!("jmp {name}"),
         LinearInstruction::JumpIfFalse(name) => format!("jmp_if_false {name}"),
         LinearInstruction::Pop => "pop".to_string(),
-        LinearInstruction::Return => "ret".to_string(),
+        LinearInstruction::Return => match current_function_return_type {
+            "void" => "return_void".to_string(),
+            _ => "return_value".to_string(),
+        },
         LinearInstruction::Label(_) => unreachable!("labels are rendered separately"),
     }
 }
@@ -203,5 +207,26 @@ define function main returns integer
 
         assert!(asm.contains("    call_void io.print_line, 1"));
         assert!(asm.contains("    call_value make_number, 0"));
+    }
+
+    #[test]
+    fn renders_store_and_return_stack_effects_explicitly() {
+        let source = r#"module demo.asm
+
+define function main returns integer
+    mutable score as integer be 1
+    set score to score + 2
+    return score
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let ir = lower_source_file(&file);
+        let linear = lower_program(&ir).expect("linear lowering should succeed");
+        let asm = render_program(&linear);
+
+        assert!(asm.contains("    store_local_pop score"));
+        assert!(asm.contains("    store_pop score"));
+        assert!(asm.contains("    return_value"));
     }
 }

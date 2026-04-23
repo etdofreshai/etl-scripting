@@ -139,5 +139,5 @@ fn cli_compile_to_asm_prints_textual_assembly() {
     assert!(stdout.contains("global main"));
     assert!(stdout.contains("main:"));
     assert!(stdout.contains("    call_void io.print_line, 1"));
-    assert!(stdout.contains("    ret"));
+    assert!(stdout.contains("    return_value"));
 }

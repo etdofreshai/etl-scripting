@@ -762,12 +762,27 @@ impl<'a> ExprParser<'a> {
         known_fields: &HashMap<String, String>,
         seen_fields: HashSet<String>,
     ) -> Result<String, String> {
-        for field_name in known_fields.keys() {
-            if !seen_fields.contains(field_name) {
+        let mut missing_fields = known_fields
+            .keys()
+            .filter(|field_name| !seen_fields.contains(*field_name))
+            .cloned()
+            .collect::<Vec<_>>();
+        missing_fields.sort();
+
+        if !missing_fields.is_empty() {
+            if missing_fields.len() == 1 {
                 return Err(format!(
-                    "missing field `{field_name}` for record `{type_name}`"
+                    "missing field `{}` for record `{type_name}`",
+                    missing_fields[0]
                 ));
             }
+
+            let joined = missing_fields
+                .iter()
+                .map(|field_name| format!("`{field_name}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!("missing fields {joined} for record `{type_name}`"));
         }
         Ok(type_name.to_string())
     }
@@ -907,6 +922,26 @@ define function main returns integer
         let error =
             validate_source_file(&file).expect_err("duplicate constructor field should fail");
         assert!(error.contains("duplicate constructor field `id` for record `entity`"));
+    }
+
+    #[test]
+    fn rejects_record_constructors_missing_multiple_fields() {
+        let source = r#"module demo.missing_constructor_fields
+
+define record entity
+    id as integer
+    health as integer
+    stamina as integer
+
+define function main returns integer
+    let actor be entity(id 1)
+    return actor.id
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        let error =
+            validate_source_file(&file).expect_err("missing constructor fields should fail");
+        assert!(error.contains("missing fields `health`, `stamina` for record `entity`"));
     }
 
     #[test]

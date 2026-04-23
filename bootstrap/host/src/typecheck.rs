@@ -719,13 +719,17 @@ impl<'a> ExprParser<'a> {
                 .get(&field_name)
                 .cloned()
                 .ok_or_else(|| format!("unknown field `{field_name}` for record `{type_name}`"))?;
+            if !seen_fields.insert(field_name.clone()) {
+                return Err(format!(
+                    "duplicate constructor field `{field_name}` for record `{type_name}`"
+                ));
+            }
             let value_type = self.parse_expression()?;
             ensure_type_matches(
                 &field_type,
                 &value_type,
                 &format!("record field `{field_name}` for `{type_name}` must be"),
             )?;
-            seen_fields.insert(field_name);
             if self.match_token(&ExprToken::Comma) {
                 continue;
             }
@@ -868,6 +872,25 @@ define function main takes value as integer, value as integer returns integer
         let file = parse_source(source).expect("source should parse");
         let error = validate_source_file(&file).expect_err("duplicate parameter should fail");
         assert!(error.contains("duplicate parameter `value` in function `main`"));
+    }
+
+    #[test]
+    fn rejects_duplicate_record_constructor_fields() {
+        let source = r#"module demo.duplicate_constructor_fields
+
+define record entity
+    id as integer
+    health as integer
+
+define function main returns integer
+    let actor be entity(id 1, id 2, health 10)
+    return actor.health
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        let error =
+            validate_source_file(&file).expect_err("duplicate constructor field should fail");
+        assert!(error.contains("duplicate constructor field `id` for record `entity`"));
     }
 
     #[test]

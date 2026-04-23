@@ -1,6 +1,7 @@
 use crate::ir::{
     IrBinaryOp, IrCompareOp, IrDeclaration, IrExpr, IrLogicalOp, IrProgram, IrStatement,
 };
+use std::fmt::Write;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinearProgram {
@@ -58,6 +59,58 @@ pub fn lower_program(program: &IrProgram) -> Result<LinearProgram, String> {
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(LinearProgram { functions })
+}
+
+pub fn render_program(program: &LinearProgram) -> String {
+    let mut output = String::new();
+
+    for (index, function) in program.functions.iter().enumerate() {
+        if index > 0 {
+            output.push('\n');
+        }
+
+        writeln!(&mut output, "fn {}:", function.name).unwrap();
+        for instruction in &function.instructions {
+            writeln!(&mut output, "    {}", render_instruction(instruction)).unwrap();
+        }
+    }
+
+    output
+}
+
+fn render_instruction(instruction: &LinearInstruction) -> String {
+    match instruction {
+        LinearInstruction::LoadInteger(value) => format!("load_integer {value}"),
+        LinearInstruction::LoadBoolean(value) => format!("load_boolean {value}"),
+        LinearInstruction::LoadText(value) => format!("load_text {value:?}"),
+        LinearInstruction::LoadReference(path) => format!("load_ref {}", path.join(".")),
+        LinearInstruction::ConstructRecord {
+            type_name,
+            field_count,
+        } => format!("construct_record {type_name} {field_count}"),
+        LinearInstruction::Call {
+            callee,
+            argument_count,
+        } => format!("call {} {argument_count}", callee.join(".")),
+        LinearInstruction::Add => "add".to_string(),
+        LinearInstruction::Subtract => "subtract".to_string(),
+        LinearInstruction::Multiply => "multiply".to_string(),
+        LinearInstruction::Divide => "divide".to_string(),
+        LinearInstruction::CompareEqual => "compare_equal".to_string(),
+        LinearInstruction::CompareLess => "compare_less".to_string(),
+        LinearInstruction::CompareGreater => "compare_greater".to_string(),
+        LinearInstruction::CompareLessEqual => "compare_less_equal".to_string(),
+        LinearInstruction::CompareGreaterEqual => "compare_greater_equal".to_string(),
+        LinearInstruction::LogicalAnd => "logical_and".to_string(),
+        LinearInstruction::LogicalOr => "logical_or".to_string(),
+        LinearInstruction::StoreLocal(name) => format!("store_local {name}"),
+        LinearInstruction::StoreReference(path) => format!("store_ref {}", path.join(".")),
+        LinearInstruction::Label(name) => format!("label {name}"),
+        LinearInstruction::Jump(name) => format!("jump {name}"),
+        LinearInstruction::JumpIfFalse(name) => format!("jump_if_false {name}"),
+        LinearInstruction::Pop => "pop".to_string(),
+        LinearInstruction::Return => "return".to_string(),
+    }
 }
 
 struct LoweringContext {

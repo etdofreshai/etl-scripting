@@ -23,6 +23,7 @@ fn print_help() {
     println!("  etl run <file.etl>");
     println!("  etl format <file.etl>");
     println!("  etl compile <file.etl> --to ir");
+    println!("  etl compile <file.etl> --to lir");
     println!("  etl compile <file.etl> --to asm");
     println!("  etl compile <file.etl> --to native --target linux-x86_64");
 }
@@ -57,6 +58,16 @@ fn compile_ir_or_exit(path: &str) {
     print!("{}", ir::render_program(&program));
 }
 
+fn compile_lir_or_exit(path: &str) {
+    let file = check_or_exit(path);
+    let ir_program = ir::lower_source_file(&file);
+    let linear_program = lir::lower_program(&ir_program).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        process::exit(1);
+    });
+    print!("{}", lir::render_program(&linear_program));
+}
+
 fn compile_or_exit(args: &[String]) {
     if args.len() < 5 {
         eprintln!("compile requires a file path and --to <target>");
@@ -71,6 +82,7 @@ fn compile_or_exit(args: &[String]) {
 
     match args[4].as_str() {
         "ir" => compile_ir_or_exit(path),
+        "lir" => compile_lir_or_exit(path),
         "asm" | "native" => println!("compile target not implemented yet: {}", args[4]),
         other => {
             eprintln!("unknown compile target: {other}");

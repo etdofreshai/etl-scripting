@@ -84,6 +84,10 @@ pub enum IrExpr {
         op: IrLogicalOp,
         right: Box<IrExpr>,
     },
+    RecordConstruct {
+        type_name: String,
+        fields: Vec<(String, IrExpr)>,
+    },
     Call {
         callee: Vec<String>,
         arguments: Vec<IrExpr>,
@@ -124,10 +128,23 @@ pub enum IrStatement {
 }
 
 pub fn lower_source_file(file: &SourceFile) -> IrProgram {
+    let known_record_types = file
+        .declarations
+        .iter()
+        .filter_map(|declaration| match declaration {
+            Declaration::Record(record) => Some(record.name.clone()),
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+
     IrProgram {
         module_path: file.module_path.clone(),
         imports: file.imports.clone(),
-        declarations: file.declarations.iter().map(lower_declaration).collect(),
+        declarations: file
+            .declarations
+            .iter()
+            .map(|declaration| lower_declaration(declaration, &known_record_types))
+            .collect(),
     }
 }
 
@@ -153,7 +170,10 @@ pub fn render_program(program: &IrProgram) -> String {
     output
 }
 
-fn lower_declaration(declaration: &Declaration) -> IrDeclaration {
+fn lower_declaration(
+    declaration: &Declaration,
+    known_record_types: &std::collections::HashSet<String>,
+) -> IrDeclaration {
     match declaration {
         Declaration::Record(record) => IrDeclaration::Record(IrRecord {
             name: record.name.clone(),
@@ -163,7 +183,7 @@ fn lower_declaration(declaration: &Declaration) -> IrDeclaration {
             name: function.name.clone(),
             parameters: function.parameters.iter().map(lower_parameter).collect(),
             return_type: function.return_type.name.clone(),
-            body: lower_statements(&function.body),
+            body: lower_statements(&function.body, known_record_types),
         }),
     }
 }
@@ -182,8 +202,14 @@ fn lower_parameter(parameter: &Parameter) -> IrParameter {
     }
 }
 
-fn lower_statements(statements: &[Statement]) -> Vec<IrStatement> {
-    statements.iter().map(lower_statement).collect()
+fn lower_statements(
+    statements: &[Statement],
+    known_record_types: &std::collections::HashSet<String>,
+) -> Vec<IrStatement> {
+    statements
+        .iter()
+        .map(|statement| lower_statement(statement, known_record_types))
+        .collect()
 }
 
 fn lower_reference_path(reference: &str) -> Vec<String> {
@@ -193,22 +219,25 @@ fn lower_reference_path(reference: &str) -> Vec<String> {
         .collect()
 }
 
-fn lower_expression(expression: &str) -> IrExpr {
+fn lower_expression(
+    expression: &str,
+    known_record_types: &std::collections::HashSet<String>,
+) -> IrExpr {
     let expression = expression.trim();
 
-    if let Some(logical) = lower_logical_expression(expression) {
+    if let Some(logical) = lower_logical_expression(expression, known_record_types) {
         return logical;
     }
 
-    if let Some(compare) = lower_compare_expression(expression) {
+    if let Some(compare) = lower_compare_expression(expression, known_record_types) {
         return compare;
     }
 
-    if let Some(binary) = lower_binary_expression(expression) {
+    if let Some(binary) = lower_binary_expression(expression, known_record_types) {
         return binary;
     }
 
-    if let Some(call) = lower_call_expression(expression) {
+    if let Some(call) = lower_call_expression(expression, known_record_types) {
         return call;
     }
 
@@ -229,7 +258,7 @@ fn lower_expression(expression: &str) -> IrExpr {
     }
 
     if is_parenthesized(expression) {
-        return lower_expression(&expression[1..expression.len() - 1]);
+        return lower_expression(&expression[1..expression.len() - 1], known_record_types);
     }
 
     if is_reference_path(expression) {
@@ -239,7 +268,10 @@ fn lower_expression(expression: &str) -> IrExpr {
     IrExpr::Opaque(expression.to_string())
 }
 
-fn lower_binary_expression(expression: &str) -> Option<IrExpr> {
+fn lower_binary_expression(
+    expression: &str,
+    known_record_types: &std::collections::HashSet<String>,
+) -> Option<IrExpr> {
     for operators in [&["+", "-"][..], &["*", "/"][..]] {
         if let Some((left, operator, right)) = split_top_level_binary(expression, operators) {
             let op = match operator.as_str() {
@@ -250,16 +282,19 @@ fn lower_binary_expression(expression: &str) -> Option<IrExpr> {
                 _ => unreachable!("unexpected operator"),
             };
             return Some(IrExpr::Binary {
-                left: Box::new(lower_expression(&left)),
+                left: Box::new(lower_expression(&left, known_record_types)),
                 op,
-                right: Box::new(lower_expression(&right)),
+                right: Box::new(lower_expression(&right, known_record_types)),
             });
         }
     }
     None
 }
 
-fn lower_logical_expression(expression: &str) -> Option<IrExpr> {
+fn lower_logical_expression(
+    expression: &str,
+    known_record_types: &std::collections::HashSet<String>,
+) -> Option<IrExpr> {
     for operators in [&["or"][..], &["and"][..]] {
         if let Some((left, operator, right)) = split_top_level_operator(expression, operators) {
             let op = match operator.as_str() {
@@ -268,16 +303,19 @@ fn lower_logical_expression(expression: &str) -> Option<IrExpr> {
                 _ => unreachable!("unexpected logical operator"),
             };
             return Some(IrExpr::Logical {
-                left: Box::new(lower_expression(&left)),
+                left: Box::new(lower_expression(&left, known_record_types)),
                 op,
-                right: Box::new(lower_expression(&right)),
+                right: Box::new(lower_expression(&right, known_record_types)),
             });
         }
     }
     None
 }
 
-fn lower_compare_expression(expression: &str) -> Option<IrExpr> {
+fn lower_compare_expression(
+    expression: &str,
+    known_record_types: &std::collections::HashSet<String>,
+) -> Option<IrExpr> {
     let operators = ["==", "<=", ">=", "<", ">"];
     let (left, operator, right) = split_top_level_operator(expression, &operators)?;
     let op = match operator.as_str() {
@@ -290,9 +328,9 @@ fn lower_compare_expression(expression: &str) -> Option<IrExpr> {
     };
 
     Some(IrExpr::Compare {
-        left: Box::new(lower_expression(&left)),
+        left: Box::new(lower_expression(&left, known_record_types)),
         op,
-        right: Box::new(lower_expression(&right)),
+        right: Box::new(lower_expression(&right, known_record_types)),
     })
 }
 
@@ -391,7 +429,10 @@ fn is_parenthesized(expression: &str) -> bool {
     depth == 0 && !in_text
 }
 
-fn lower_call_expression(expression: &str) -> Option<IrExpr> {
+fn lower_call_expression(
+    expression: &str,
+    known_record_types: &std::collections::HashSet<String>,
+) -> Option<IrExpr> {
     let open_paren = expression.find('(')?;
     if !expression.ends_with(')') {
         return None;
@@ -403,9 +444,28 @@ fn lower_call_expression(expression: &str) -> Option<IrExpr> {
     }
 
     let arguments_source = &expression[open_paren + 1..expression.len() - 1];
+    if known_record_types.contains(callee) && !callee.contains('.') {
+        let fields = split_top_level_arguments(arguments_source)
+            .into_iter()
+            .map(|argument| {
+                let mut parts = argument.splitn(2, char::is_whitespace);
+                let field_name = parts.next().unwrap_or_default().trim().to_string();
+                let field_value = parts.next().unwrap_or("").trim();
+                (
+                    field_name,
+                    lower_expression(field_value, known_record_types),
+                )
+            })
+            .collect();
+        return Some(IrExpr::RecordConstruct {
+            type_name: callee.to_string(),
+            fields,
+        });
+    }
+
     let arguments = split_top_level_arguments(arguments_source)
         .into_iter()
-        .map(|argument| lower_expression(&argument))
+        .map(|argument| lower_expression(&argument, known_record_types))
         .collect();
 
     Some(IrExpr::Call {
@@ -455,11 +515,14 @@ fn is_identifier(segment: &str) -> bool {
     chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
-fn lower_statement(statement: &Statement) -> IrStatement {
+fn lower_statement(
+    statement: &Statement,
+    known_record_types: &std::collections::HashSet<String>,
+) -> IrStatement {
     match statement {
         Statement::Let { name, value } => IrStatement::Let {
             name: name.clone(),
-            value: lower_expression(value),
+            value: lower_expression(value, known_record_types),
         },
         Statement::Mutable {
             name,
@@ -468,30 +531,32 @@ fn lower_statement(statement: &Statement) -> IrStatement {
         } => IrStatement::Mutable {
             name: name.clone(),
             type_name: value_type.name.clone(),
-            value: lower_expression(value),
+            value: lower_expression(value, known_record_types),
         },
         Statement::Set { target, value } => IrStatement::Set {
             target: lower_reference_path(target),
-            value: lower_expression(value),
+            value: lower_expression(value, known_record_types),
         },
         Statement::If {
             condition,
             then_body,
             else_body,
         } => IrStatement::If {
-            condition: lower_expression(condition),
-            then_body: lower_statements(then_body),
-            else_body: lower_statements(else_body),
+            condition: lower_expression(condition, known_record_types),
+            then_body: lower_statements(then_body, known_record_types),
+            else_body: lower_statements(else_body, known_record_types),
         },
         Statement::RepeatWhile { condition, body } => IrStatement::RepeatWhile {
-            condition: lower_expression(condition),
-            body: lower_statements(body),
+            condition: lower_expression(condition, known_record_types),
+            body: lower_statements(body, known_record_types),
         },
         Statement::Return { value } => IrStatement::Return {
-            value: value.as_deref().map(lower_expression),
+            value: value
+                .as_deref()
+                .map(|value| lower_expression(value, known_record_types)),
         },
         Statement::Expression { value } => IrStatement::Expr {
-            value: lower_expression(value),
+            value: lower_expression(value, known_record_types),
         },
     }
 }
@@ -648,6 +713,15 @@ fn render_expression(expression: &IrExpr) -> String {
             render_logical_op(op),
             render_expression_with_precedence(right, logical_precedence(op) + 1)
         ),
+        IrExpr::RecordConstruct { type_name, fields } => format!(
+            "{}({})",
+            type_name,
+            fields
+                .iter()
+                .map(|(name, value)| format!("{} {}", name, render_expression(value)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         IrExpr::Call { callee, arguments } => format!(
             "{}({})",
             callee.join("."),
@@ -802,6 +876,19 @@ define function main returns integer
             super::IrDeclaration::Function(function) => function,
             other => panic!("expected function declaration, got {other:?}"),
         };
+
+        match &function.body[0] {
+            super::IrStatement::Mutable { value, .. } => {
+                assert_eq!(
+                    value,
+                    &IrExpr::RecordConstruct {
+                        type_name: "counter".to_string(),
+                        fields: vec![("value".to_string(), IrExpr::Integer(1))],
+                    }
+                );
+            }
+            other => panic!("expected mutable statement, got {other:?}"),
+        }
 
         match &function.body[1] {
             super::IrStatement::Set { target, value } => {

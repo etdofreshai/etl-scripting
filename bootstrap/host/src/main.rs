@@ -5,6 +5,7 @@ mod diagnostic;
 mod interpreter;
 mod ir;
 mod lexer;
+mod lir;
 mod parser;
 mod span;
 mod token;

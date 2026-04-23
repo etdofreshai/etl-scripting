@@ -9,11 +9,21 @@ pub fn render_program(program: &LinearProgram, target: &str) -> Result<String, S
 }
 
 fn render_linux_x86_64(program: &LinearProgram) -> String {
+    let string_literals = collect_string_literals(program);
     let mut output = String::new();
     writeln!(&mut output, "target linux-x86_64").unwrap();
     writeln!(&mut output, "format elf64").unwrap();
     writeln!(&mut output, "default rel").unwrap();
     writeln!(&mut output).unwrap();
+
+    if !string_literals.is_empty() {
+        writeln!(&mut output, "section .rodata").unwrap();
+        for (label, value) in &string_literals {
+            writeln!(&mut output, "{label}: db {:?}, 0", value).unwrap();
+        }
+        writeln!(&mut output).unwrap();
+    }
+
     writeln!(&mut output, "section .text").unwrap();
 
     for callee in collect_external_callees(program) {
@@ -52,6 +62,19 @@ fn render_linux_x86_64(program: &LinearProgram) -> String {
                 {
                     writeln!(&mut output, "    mov rax, {value}").unwrap();
                 }
+                LinearInstruction::LoadText(value)
+                    if matches!(
+                        function.instructions.get(instruction_index + 1),
+                        Some(LinearInstruction::Call {
+                            callee,
+                            argument_count: 1,
+                        }) if callee == &vec!["io".to_string(), "print_line".to_string()]
+                    ) =>
+                {
+                    let label = string_label_for(&string_literals, value)
+                        .expect("string label should exist");
+                    writeln!(&mut output, "    lea rdi, [rel {label}]").unwrap();
+                }
                 LinearInstruction::Label(name) => writeln!(&mut output, "{}:", name).unwrap(),
                 LinearInstruction::Return => {
                     writeln!(&mut output, "    mov rsp, rbp").unwrap();
@@ -73,13 +96,38 @@ fn collect_external_callees(program: &LinearProgram) -> Vec<String> {
         .iter()
         .flat_map(|function| function.instructions.iter())
         .filter_map(|instruction| match instruction {
-            LinearInstruction::Call { callee, .. } => Some(callee.join(".")),
+            LinearInstruction::Call { callee, .. } => Some(native_symbol_name(&callee.join("."))),
             _ => None,
         })
         .collect::<Vec<_>>();
     callees.sort();
     callees.dedup();
     callees
+}
+
+fn collect_string_literals(program: &LinearProgram) -> Vec<(String, String)> {
+    let mut literals = Vec::new();
+    for function in &program.functions {
+        for instruction in &function.instructions {
+            if let LinearInstruction::LoadText(value) = instruction {
+                if literals.iter().all(|(_, existing)| existing != value) {
+                    literals.push((format!("str_{}", literals.len()), value.clone()));
+                }
+            }
+        }
+    }
+    literals
+}
+
+fn string_label_for<'a>(literals: &'a [(String, String)], value: &str) -> Option<&'a str> {
+    literals
+        .iter()
+        .find(|(_, literal)| literal == value)
+        .map(|(label, _)| label.as_str())
+}
+
+fn native_symbol_name(name: &str) -> String {
+    name.replace('.', "_")
 }
 
 fn render_instruction(instruction: &LinearInstruction) -> String {
@@ -95,7 +143,11 @@ fn render_instruction(instruction: &LinearInstruction) -> String {
         LinearInstruction::Call {
             callee,
             argument_count,
-        } => format!("call {}, {}", callee.join("."), argument_count),
+        } => format!(
+            "call {}, {}",
+            native_symbol_name(&callee.join(".")),
+            argument_count
+        ),
         LinearInstruction::Add => "add_pop".to_string(),
         LinearInstruction::Subtract => "sub_pop".to_string(),
         LinearInstruction::Multiply => "mul_pop".to_string(),
@@ -129,7 +181,7 @@ mod tests {
         let source = r#"module demo.native
 
 define function main returns integer
-    io.print_line("Hello")
+    io.print_line("Hello from ETL")
     return 0
 "#;
 
@@ -143,13 +195,18 @@ define function main returns integer
         assert!(native.contains("target linux-x86_64"));
         assert!(native.contains("format elf64"));
         assert!(native.contains("default rel"));
+        assert!(native.contains("section .rodata"));
+        assert!(native.contains("str_0: db \"Hello from ETL\", 0"));
         assert!(native.contains("section .text"));
         assert!(native.contains("global main"));
-        assert!(native.contains("extern io.print_line"));
+        assert!(native.contains("extern io_print_line"));
         assert!(native.contains("main:"));
         assert!(native.contains("    push rbp"));
         assert!(native.contains("    mov rbp, rsp"));
-        assert!(native.contains("    call io.print_line, 1"));
+        assert!(native.contains("    lea rdi, [rel str_0]"));
+        assert!(native.contains("    call io_print_line, 1"));
+        assert!(!native.contains("push_text \"Hello from ETL\""));
+        assert!(!native.contains("call io.print_line, 1"));
         assert!(native.contains("    mov rax, 0"));
         assert!(!native.contains("push_int 0"));
         assert!(native.contains("    mov rsp, rbp"));

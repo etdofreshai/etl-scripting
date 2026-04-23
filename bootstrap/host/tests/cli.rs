@@ -165,10 +165,15 @@ fn cli_compile_to_native_linux_x86_64_prints_targeted_backend_output() {
     assert!(stdout.contains("target linux-x86_64"));
     assert!(stdout.contains("format elf64"));
     assert!(stdout.contains("default rel"));
+    assert!(stdout.contains("section .rodata"));
+    assert!(stdout.contains("str_0: db \"Hello from ETL\", 0"));
     assert!(stdout.contains("section .text"));
     assert!(stdout.contains("global main"));
     assert!(stdout.contains("    push rbp"));
     assert!(stdout.contains("    mov rbp, rsp"));
+    assert!(stdout.contains("    lea rdi, [rel str_0]"));
+    assert!(stdout.contains("    call io_print_line"));
+    assert!(!stdout.contains("push_text \"Hello from ETL\""));
     assert!(stdout.contains("    mov rax, 0"));
     assert!(!stdout.contains("push_int 0"));
     assert!(stdout.contains("    ret"));

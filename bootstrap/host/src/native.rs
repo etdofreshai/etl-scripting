@@ -1,4 +1,5 @@
-use crate::lir::{LinearInstruction, LinearProgram};
+use crate::lir::{LinearFunction, LinearInstruction, LinearProgram};
+use std::collections::BTreeMap;
 use std::fmt::Write;
 
 pub fn render_program(program: &LinearProgram, target: &str) -> Result<String, String> {
@@ -47,9 +48,13 @@ fn render_linux_x86_64(program: &LinearProgram) -> String {
             writeln!(&mut output).unwrap();
         }
 
+        let local_offsets = collect_local_offsets(function);
         writeln!(&mut output, "{}:", function.name).unwrap();
         writeln!(&mut output, "    push rbp").unwrap();
         writeln!(&mut output, "    mov rbp, rsp").unwrap();
+        if !local_offsets.is_empty() {
+            writeln!(&mut output, "    sub rsp, {}", local_offsets.len() * 8).unwrap();
+        }
 
         let mut instruction_index = 0;
         while instruction_index < function.instructions.len() {
@@ -61,6 +66,77 @@ fn render_linux_x86_64(program: &LinearProgram) -> String {
                     ) =>
                 {
                     writeln!(&mut output, "    mov rax, {value}").unwrap();
+                }
+                LinearInstruction::LoadInteger(value)
+                    if matches!(
+                        function.instructions.get(instruction_index + 1),
+                        Some(LinearInstruction::StoreLocal(_))
+                    ) =>
+                {
+                    if let Some(LinearInstruction::StoreLocal(name)) =
+                        function.instructions.get(instruction_index + 1)
+                    {
+                        if let Some(offset) = local_offsets.get(name) {
+                            writeln!(&mut output, "    mov qword [rbp-{offset}], {value}").unwrap();
+                            instruction_index += 1;
+                        }
+                    }
+                }
+                LinearInstruction::LoadReference(path)
+                    if matches!(
+                        function.instructions.get(instruction_index + 1),
+                        Some(LinearInstruction::Return)
+                    ) && path.len() == 1 =>
+                {
+                    if let Some(offset) = local_offsets.get(&path[0]) {
+                        writeln!(&mut output, "    mov rax, qword [rbp-{offset}]").unwrap();
+                    } else {
+                        writeln!(
+                            &mut output,
+                            "    {}",
+                            render_instruction(&function.instructions[instruction_index])
+                        )
+                        .unwrap();
+                    }
+                }
+                LinearInstruction::LoadReference(path)
+                    if matches!(
+                        function.instructions.get(instruction_index + 1),
+                        Some(LinearInstruction::LoadInteger(_))
+                    ) && path.len() == 1 =>
+                {
+                    if let (
+                        Some(offset),
+                        Some(LinearInstruction::LoadInteger(value)),
+                        Some(LinearInstruction::Add),
+                        Some(LinearInstruction::StoreReference(target)),
+                    ) = (
+                        local_offsets.get(&path[0]),
+                        function.instructions.get(instruction_index + 1),
+                        function.instructions.get(instruction_index + 2),
+                        function.instructions.get(instruction_index + 3),
+                    ) {
+                        if target.len() == 1 && target[0] == path[0] {
+                            writeln!(&mut output, "    mov rax, qword [rbp-{offset}]").unwrap();
+                            writeln!(&mut output, "    add rax, {value}").unwrap();
+                            writeln!(&mut output, "    mov qword [rbp-{offset}], rax").unwrap();
+                            instruction_index += 3;
+                        } else {
+                            writeln!(
+                                &mut output,
+                                "    {}",
+                                render_instruction(&function.instructions[instruction_index])
+                            )
+                            .unwrap();
+                        }
+                    } else {
+                        writeln!(
+                            &mut output,
+                            "    {}",
+                            render_instruction(&function.instructions[instruction_index])
+                        )
+                        .unwrap();
+                    }
                 }
                 LinearInstruction::LoadText(value)
                     if matches!(
@@ -103,6 +179,26 @@ fn collect_external_callees(program: &LinearProgram) -> Vec<String> {
     callees.sort();
     callees.dedup();
     callees
+}
+
+fn collect_local_offsets(function: &LinearFunction) -> BTreeMap<String, usize> {
+    let mut offsets = BTreeMap::new();
+    for instruction in &function.instructions {
+        match instruction {
+            LinearInstruction::StoreLocal(name) => {
+                let next_offset = (offsets.len() + 1) * 8;
+                offsets.entry(name.clone()).or_insert(next_offset);
+            }
+            LinearInstruction::StoreReference(path) | LinearInstruction::LoadReference(path)
+                if path.len() == 1 =>
+            {
+                let next_offset = (offsets.len() + 1) * 8;
+                offsets.entry(path[0].clone()).or_insert(next_offset);
+            }
+            _ => {}
+        }
+    }
+    offsets
 }
 
 fn collect_string_literals(program: &LinearProgram) -> Vec<(String, String)> {
@@ -210,5 +306,33 @@ define function main returns integer
         assert!(native.contains("    mov rsp, rbp"));
         assert!(native.contains("    pop rbp"));
         assert!(native.contains("    ret"));
+    }
+
+    #[test]
+    fn lowers_integer_local_updates_into_stack_slots() {
+        let source = r#"module demo.native
+
+define function main returns integer
+    mutable score as integer be 1
+    set score to score + 2
+    return score
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let ir = lower_source_file(&file);
+        let linear = lower_program(&ir).expect("linear lowering should succeed");
+        let native =
+            render_program(&linear, "linux-x86_64").expect("native rendering should succeed");
+
+        assert!(native.contains("    sub rsp, 8"));
+        assert!(native.contains("    mov qword [rbp-8], 1"));
+        assert!(native.contains("    mov rax, qword [rbp-8]"));
+        assert!(native.contains("    add rax, 2"));
+        assert!(native.contains("    mov qword [rbp-8], rax"));
+        assert!(native.contains("    mov rax, qword [rbp-8]"));
+        assert!(!native.contains("store_local_pop score"));
+        assert!(!native.contains("store_pop score"));
+        assert!(!native.contains("add_pop"));
     }
 }

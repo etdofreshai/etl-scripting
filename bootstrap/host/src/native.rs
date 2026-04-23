@@ -743,22 +743,24 @@ fn try_render_local_compute_call(
         Some(LinearInstruction::LoadInteger(value)) => *value,
         _ => return None,
     };
-    let callee = match (
+    let (mnemonic, callee) = match (
         instructions.get(instruction_index + 2)?,
         instructions.get(instruction_index + 3)?,
     ) {
         (
-            LinearInstruction::Add,
+            instruction,
             LinearInstruction::Call {
                 callee,
                 argument_count: 1,
             },
-        ) if callee.len() == 1 && user_functions.contains(&callee[0]) => callee,
+        ) if callee.len() == 1 && user_functions.contains(&callee[0]) => {
+            (arithmetic_mnemonic(instruction)?, callee)
+        }
         _ => return None,
     };
 
     writeln!(output, "    mov rdi, qword [rbp-{offset}]").unwrap();
-    writeln!(output, "    add rdi, {value}").unwrap();
+    writeln!(output, "    {mnemonic} rdi, {value}").unwrap();
     writeln!(output, "    call {}", native_symbol_name(&callee.join("."))).unwrap();
     Some(3)
 }
@@ -1108,6 +1110,34 @@ define function main returns integer
         assert!(native.contains("    call helper"));
         assert!(!native.contains("load n"));
         assert!(!native.contains("add_pop"));
+    }
+
+    #[test]
+    fn lowers_multiplied_single_argument_user_calls() {
+        let source = r#"module demo.native
+
+define function helper takes value as integer returns integer
+    return value
+
+define function main returns integer
+    mutable n as integer be 5
+    return helper(n * 2)
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let ir = lower_source_file(&file);
+        let linear = lower_program(&ir).expect("linear lowering should succeed");
+        let native =
+            render_program(&linear, "linux-x86_64").expect("native rendering should succeed");
+
+        assert!(native.contains("main:"));
+        assert!(native.contains("    mov qword [rbp-8], 5"));
+        assert!(native.contains("    mov rdi, qword [rbp-8]"));
+        assert!(native.contains("    imul rdi, 2"));
+        assert!(native.contains("    call helper"));
+        assert!(!native.contains("load n"));
+        assert!(!native.contains("mul_pop"));
     }
 
     #[test]

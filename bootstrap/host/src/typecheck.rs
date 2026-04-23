@@ -18,10 +18,14 @@ pub fn validate_source_file(file: &SourceFile) -> Result<(), String> {
     let mut record_fields: HashMap<String, HashMap<String, String>> = HashMap::new();
     let mut functions = builtin_functions();
     let mut seen_declarations = HashSet::new();
+    let mut seen_declaration_names = HashSet::new();
 
     for declaration in &file.declarations {
         match declaration {
             Declaration::Record(record) => {
+                if !seen_declaration_names.insert(record.name.clone()) {
+                    return Err(format!("duplicate declaration name `{}`", record.name));
+                }
                 if !seen_declarations.insert(format!("record:{}", record.name)) {
                     return Err(format!("duplicate record declaration: {}", record.name));
                 }
@@ -47,6 +51,9 @@ pub fn validate_source_file(file: &SourceFile) -> Result<(), String> {
                 );
             }
             Declaration::Function(function) => {
+                if !seen_declaration_names.insert(function.name.clone()) {
+                    return Err(format!("duplicate declaration name `{}`", function.name));
+                }
                 if !seen_declarations.insert(format!("function:{}", function.name)) {
                     return Err(format!("duplicate function declaration: {}", function.name));
                 }
@@ -873,6 +880,23 @@ define function broken takes value as mystery_type returns integer
         let file = parse_source(source).expect("source should parse");
         let error = validate_source_file(&file).expect_err("unknown type should fail");
         assert!(error.contains("mystery_type"));
+    }
+
+    #[test]
+    fn rejects_record_and_function_name_collisions() {
+        let source = r#"module demo.name_collision
+
+define record entity
+    id as integer
+
+define function entity returns integer
+    return 0
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        let error =
+            validate_source_file(&file).expect_err("declaration name collision should fail");
+        assert!(error.contains("duplicate declaration name `entity`"));
     }
 
     #[test]

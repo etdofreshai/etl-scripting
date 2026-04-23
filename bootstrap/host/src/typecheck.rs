@@ -17,6 +17,7 @@ pub fn validate_source_file(file: &SourceFile) -> Result<(), String> {
     known_types.insert("standard.random.generator".to_string());
     let mut record_fields: HashMap<String, HashMap<String, String>> = HashMap::new();
     let mut functions = builtin_functions();
+    let builtin_namespaces = builtin_namespace_roots();
     let mut seen_declarations = HashSet::new();
     let mut seen_declaration_names = HashSet::new();
 
@@ -26,6 +27,12 @@ pub fn validate_source_file(file: &SourceFile) -> Result<(), String> {
                 if BUILTIN_TYPES.contains(&record.name.as_str()) {
                     return Err(format!(
                         "declaration name `{}` conflicts with builtin type",
+                        record.name
+                    ));
+                }
+                if builtin_namespaces.contains(record.name.as_str()) {
+                    return Err(format!(
+                        "declaration name `{}` conflicts with builtin namespace",
                         record.name
                     ));
                 }
@@ -60,6 +67,12 @@ pub fn validate_source_file(file: &SourceFile) -> Result<(), String> {
                 if BUILTIN_TYPES.contains(&function.name.as_str()) {
                     return Err(format!(
                         "declaration name `{}` conflicts with builtin type",
+                        function.name
+                    ));
+                }
+                if builtin_namespaces.contains(function.name.as_str()) {
+                    return Err(format!(
+                        "declaration name `{}` conflicts with builtin namespace",
                         function.name
                     ));
                 }
@@ -397,6 +410,10 @@ fn builtin_functions() -> HashMap<String, FunctionSignature> {
             },
         ),
     ])
+}
+
+fn builtin_namespace_roots() -> HashSet<&'static str> {
+    HashSet::from(["io", "random", "event"])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -925,6 +942,19 @@ define function main returns integer
         let file = parse_source(source).expect("source should parse");
         let error = validate_source_file(&file).expect_err("builtin type name should fail");
         assert!(error.contains("declaration name `integer` conflicts with builtin type"));
+    }
+
+    #[test]
+    fn rejects_declarations_named_after_builtin_namespaces() {
+        let source = r#"module demo.builtin_namespace_collision
+
+define function random returns integer
+    return 0
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        let error = validate_source_file(&file).expect_err("builtin namespace name should fail");
+        assert!(error.contains("declaration name `random` conflicts with builtin namespace"));
     }
 
     #[test]

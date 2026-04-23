@@ -123,6 +123,21 @@ fn render_linux_x86_64(program: &LinearProgram) -> String {
                     } else if let (
                         Some(offset),
                         Some(LinearInstruction::LoadInteger(value)),
+                        Some(LinearInstruction::CompareEqual),
+                        Some(LinearInstruction::JumpIfFalse(label)),
+                    ) = (
+                        local_offsets.get(&path[0]),
+                        function.instructions.get(instruction_index + 1),
+                        function.instructions.get(instruction_index + 2),
+                        function.instructions.get(instruction_index + 3),
+                    ) {
+                        writeln!(&mut output, "    mov rax, qword [rbp-{offset}]").unwrap();
+                        writeln!(&mut output, "    cmp rax, {value}").unwrap();
+                        writeln!(&mut output, "    jne {label}").unwrap();
+                        instruction_index += 3;
+                    } else if let (
+                        Some(offset),
+                        Some(LinearInstruction::LoadInteger(value)),
                         Some(LinearInstruction::Add),
                         Some(LinearInstruction::StoreReference(target)),
                     ) = (
@@ -376,6 +391,32 @@ define function main returns integer
         assert!(native.contains("    cmp rax, 3"));
         assert!(native.contains("    jge main_if_else_0"));
         assert!(!native.contains("cmp_lt_pop"));
+        assert!(!native.contains("jmp_if_false_pop main_if_else_0"));
+    }
+
+    #[test]
+    fn lowers_integer_equality_comparisons_into_cmp_and_jump() {
+        let source = r#"module demo.native
+
+define function main returns integer
+    mutable score as integer be 1
+    if score == 1
+        return 1
+    else
+        return 0
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let ir = lower_source_file(&file);
+        let linear = lower_program(&ir).expect("linear lowering should succeed");
+        let native =
+            render_program(&linear, "linux-x86_64").expect("native rendering should succeed");
+
+        assert!(native.contains("    mov rax, qword [rbp-8]"));
+        assert!(native.contains("    cmp rax, 1"));
+        assert!(native.contains("    jne main_if_else_0"));
+        assert!(!native.contains("cmp_eq_pop"));
         assert!(!native.contains("jmp_if_false_pop main_if_else_0"));
     }
 }

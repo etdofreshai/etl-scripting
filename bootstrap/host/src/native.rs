@@ -11,6 +11,7 @@ pub fn render_program(program: &LinearProgram, target: &str) -> Result<String, S
 
 fn render_linux_x86_64(program: &LinearProgram) -> String {
     let string_literals = collect_string_literals(program);
+    let user_functions = collect_user_function_names(program);
     let mut output = String::new();
     writeln!(&mut output, "target linux-x86_64").unwrap();
     writeln!(&mut output, "format elf64").unwrap();
@@ -55,6 +56,7 @@ fn render_linux_x86_64(program: &LinearProgram) -> String {
         if !local_offsets.is_empty() {
             writeln!(&mut output, "    sub rsp, {}", local_offsets.len() * 8).unwrap();
         }
+        render_parameter_prologue(&mut output, function, &local_offsets);
 
         let mut instruction_index = 0;
         while instruction_index < function.instructions.len() {
@@ -66,6 +68,31 @@ fn render_linux_x86_64(program: &LinearProgram) -> String {
                     ) =>
                 {
                     writeln!(&mut output, "    mov rax, {value}").unwrap();
+                }
+                LinearInstruction::LoadInteger(_)
+                    if matches!(
+                        function.instructions.get(instruction_index + 1),
+                        Some(LinearInstruction::Call {
+                            argument_count: 1,
+                            ..
+                        })
+                    ) =>
+                {
+                    if let Some(consumed) = try_render_single_integer_call(
+                        &mut output,
+                        &user_functions,
+                        &function.instructions,
+                        instruction_index,
+                    ) {
+                        instruction_index += consumed;
+                    } else {
+                        writeln!(
+                            &mut output,
+                            "    {}",
+                            render_instruction(&function.instructions[instruction_index])
+                        )
+                        .unwrap();
+                    }
                 }
                 LinearInstruction::LoadInteger(_)
                     if matches!(
@@ -224,6 +251,41 @@ fn collect_external_callees(program: &LinearProgram) -> Vec<String> {
     callees
 }
 
+fn collect_user_function_names(program: &LinearProgram) -> Vec<String> {
+    program
+        .functions
+        .iter()
+        .map(|function| function.name.clone())
+        .collect()
+}
+
+fn render_parameter_prologue(
+    output: &mut String,
+    function: &LinearFunction,
+    local_offsets: &BTreeMap<String, usize>,
+) {
+    for (index, parameter_name) in function.parameter_names.iter().enumerate() {
+        let Some(register) = integer_argument_register(index) else {
+            break;
+        };
+        if let Some(offset) = local_offsets.get(parameter_name) {
+            writeln!(output, "    mov qword [rbp-{offset}], {register}").unwrap();
+        }
+    }
+}
+
+fn integer_argument_register(index: usize) -> Option<&'static str> {
+    match index {
+        0 => Some("rdi"),
+        1 => Some("rsi"),
+        2 => Some("rdx"),
+        3 => Some("rcx"),
+        4 => Some("r8"),
+        5 => Some("r9"),
+        _ => None,
+    }
+}
+
 fn collect_local_offsets(function: &LinearFunction) -> BTreeMap<String, usize> {
     let mut offsets = BTreeMap::new();
     for instruction in &function.instructions {
@@ -282,6 +344,29 @@ fn try_render_local_compare_branch(
     writeln!(output, "    cmp rax, {value}").unwrap();
     writeln!(output, "    {jump} {label}").unwrap();
     Some(3)
+}
+
+fn try_render_single_integer_call(
+    output: &mut String,
+    user_functions: &[String],
+    instructions: &[LinearInstruction],
+    instruction_index: usize,
+) -> Option<usize> {
+    let value = match instructions.get(instruction_index) {
+        Some(LinearInstruction::LoadInteger(value)) => *value,
+        _ => return None,
+    };
+    let callee = match instructions.get(instruction_index + 1) {
+        Some(LinearInstruction::Call {
+            callee,
+            argument_count: 1,
+        }) if callee.len() == 1 && user_functions.contains(&callee[0]) => callee,
+        _ => return None,
+    };
+
+    writeln!(output, "    mov rdi, {value}").unwrap();
+    writeln!(output, "    call {}", native_symbol_name(&callee.join("."))).unwrap();
+    Some(1)
 }
 
 fn try_render_integer_local_initializer(
@@ -575,6 +660,35 @@ define function main returns integer
         assert!(native.contains("    mov rsp, rbp"));
         assert!(native.contains("    pop rbp"));
         assert!(native.contains("    ret"));
+    }
+
+    #[test]
+    fn lowers_single_integer_argument_user_calls() {
+        let source = r#"module demo.native
+
+define function helper takes value as integer returns integer
+    return value
+
+define function main returns integer
+    return helper(7)
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let ir = lower_source_file(&file);
+        let linear = lower_program(&ir).expect("linear lowering should succeed");
+        let native =
+            render_program(&linear, "linux-x86_64").expect("native rendering should succeed");
+
+        assert!(native.contains("helper:"));
+        assert!(native.contains("    sub rsp, 8"));
+        assert!(native.contains("    mov qword [rbp-8], rdi"));
+        assert!(native.contains("    mov rax, qword [rbp-8]"));
+        assert!(native.contains("main:"));
+        assert!(native.contains("    mov rdi, 7"));
+        assert!(native.contains("    call helper"));
+        assert!(!native.contains("push_int 7"));
+        assert!(!native.contains("load value"));
     }
 
     #[test]

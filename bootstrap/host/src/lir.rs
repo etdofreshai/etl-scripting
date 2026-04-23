@@ -12,6 +12,7 @@ pub struct LinearProgram {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinearFunction {
     pub name: String,
+    pub parameter_names: Vec<String>,
     pub return_type: String,
     pub instructions: Vec<LinearInstruction>,
 }
@@ -175,6 +176,11 @@ fn lower_function(
 
     Ok(LinearFunction {
         name: function.name.clone(),
+        parameter_names: function
+            .parameters
+            .iter()
+            .map(|parameter| parameter.name.clone())
+            .collect(),
         return_type: function.return_type.clone(),
         instructions,
     })
@@ -351,6 +357,12 @@ define function main takes score as integer, bonus as integer, limit as integer,
             LinearProgram {
                 functions: vec![LinearFunction {
                     name: "main".to_string(),
+                    parameter_names: vec![
+                        "score".to_string(),
+                        "bonus".to_string(),
+                        "limit".to_string(),
+                        "ready".to_string(),
+                    ],
                     return_type: "boolean".to_string(),
                     instructions: vec![
                         LinearInstruction::LoadReference(vec!["score".to_string()]),
@@ -390,6 +402,7 @@ define function main takes ready as boolean returns integer
             LinearProgram {
                 functions: vec![LinearFunction {
                     name: "main".to_string(),
+                    parameter_names: vec!["ready".to_string()],
                     return_type: "integer".to_string(),
                     instructions: vec![
                         LinearInstruction::LoadReference(vec!["ready".to_string()]),
@@ -428,6 +441,7 @@ define function main takes ready as boolean returns integer
             LinearProgram {
                 functions: vec![LinearFunction {
                     name: "main".to_string(),
+                    parameter_names: vec!["ready".to_string()],
                     return_type: "integer".to_string(),
                     instructions: vec![
                         LinearInstruction::LoadInteger(0),
@@ -468,6 +482,7 @@ define function main returns integer
             LinearProgram {
                 functions: vec![LinearFunction {
                     name: "main".to_string(),
+                    parameter_names: vec![],
                     return_type: "integer".to_string(),
                     instructions: vec![
                         LinearInstruction::LoadText("Hello".to_string()),

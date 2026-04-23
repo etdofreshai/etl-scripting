@@ -5,6 +5,14 @@ pub fn render_program(program: &LinearProgram) -> String {
     let mut output = String::new();
     writeln!(&mut output, "section .text").unwrap();
 
+    for callee in collect_external_callees(program) {
+        writeln!(&mut output, "extern {callee}").unwrap();
+    }
+
+    if !program.functions.is_empty() {
+        output.push('\n');
+    }
+
     for function in &program.functions {
         writeln!(&mut output, "global {}", function.name).unwrap();
     }
@@ -32,6 +40,21 @@ pub fn render_program(program: &LinearProgram) -> String {
     }
 
     output
+}
+
+fn collect_external_callees(program: &LinearProgram) -> Vec<String> {
+    let mut callees = program
+        .functions
+        .iter()
+        .flat_map(|function| function.instructions.iter())
+        .filter_map(|instruction| match instruction {
+            LinearInstruction::Call { callee, .. } => Some(callee.join(".")),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    callees.sort();
+    callees.dedup();
+    callees
 }
 
 fn render_instruction(instruction: &LinearInstruction) -> String {
@@ -101,5 +124,26 @@ define function main takes ready as boolean returns integer
         assert!(asm.contains("    jmp_if_false main_if_else_0"));
         assert!(asm.contains("main_if_else_0:"));
         assert!(asm.contains("    ret"));
+    }
+
+    #[test]
+    fn renders_builtin_calls_as_extern_declarations() {
+        let source = r#"module demo.asm
+
+define function main takes seed as integer returns integer
+    io.print_line("Hello")
+    let generator be random.from_seed(seed)
+    return random.next_integer(generator, 1, 10)
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let ir = lower_source_file(&file);
+        let linear = lower_program(&ir).expect("linear lowering should succeed");
+        let asm = render_program(&linear);
+
+        assert!(asm.contains("extern io.print_line"));
+        assert!(asm.contains("extern random.from_seed"));
+        assert!(asm.contains("extern random.next_integer"));
     }
 }

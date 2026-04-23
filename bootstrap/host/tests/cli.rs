@@ -141,3 +141,29 @@ fn cli_compile_to_asm_prints_textual_assembly() {
     assert!(stdout.contains("    call_void io.print_line, 1"));
     assert!(stdout.contains("    return_value"));
 }
+
+#[test]
+fn cli_compile_to_native_linux_x86_64_prints_targeted_backend_output() {
+    let binary = env!("CARGO_BIN_EXE_etl-bootstrap-host");
+    let output = Command::new(binary)
+        .arg("compile")
+        .arg(example_path("hello_world.etl"))
+        .arg("--to")
+        .arg("native")
+        .arg("--target")
+        .arg("linux-x86_64")
+        .output()
+        .expect("compile command should run");
+
+    assert!(
+        output.status.success(),
+        "compile command failed: {:?}",
+        output
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf8");
+    assert!(stdout.contains("target linux-x86_64"));
+    assert!(stdout.contains("format elf64"));
+    assert!(stdout.contains("section .text"));
+    assert!(stdout.contains("global main"));
+}

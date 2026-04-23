@@ -7,6 +7,7 @@ mod interpreter;
 mod ir;
 mod lexer;
 mod lir;
+mod native;
 mod parser;
 mod span;
 mod token;
@@ -79,6 +80,20 @@ fn compile_asm_or_exit(path: &str) {
     print!("{}", asm::render_program(&linear_program));
 }
 
+fn compile_native_or_exit(path: &str, target: &str) {
+    let file = check_or_exit(path);
+    let ir_program = ir::lower_source_file(&file);
+    let linear_program = lir::lower_program(&ir_program).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        process::exit(1);
+    });
+    let output = native::render_program(&linear_program, target).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        process::exit(1);
+    });
+    print!("{output}");
+}
+
 fn compile_or_exit(args: &[String]) {
     if args.len() < 5 {
         eprintln!("compile requires a file path and --to <target>");
@@ -95,7 +110,13 @@ fn compile_or_exit(args: &[String]) {
         "ir" => compile_ir_or_exit(path),
         "lir" => compile_lir_or_exit(path),
         "asm" => compile_asm_or_exit(path),
-        "native" => println!("compile target not implemented yet: {}", args[4]),
+        "native" => {
+            if args.len() < 7 || args[5] != "--target" {
+                eprintln!("native compile requires --target <triple>");
+                process::exit(1);
+            }
+            compile_native_or_exit(path, &args[6]);
+        }
         other => {
             eprintln!("unknown compile target: {other}");
             process::exit(1);

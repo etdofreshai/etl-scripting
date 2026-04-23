@@ -112,7 +112,7 @@ fn cli_compile_to_lir_prints_linear_lowering() {
     let stdout = String::from_utf8(output.stdout).expect("stdout should be utf8");
     assert!(stdout.contains("fn main:"));
     assert!(stdout.contains("call io.print_line 1"));
-    assert!(stdout.contains("pop"));
+    assert!(!stdout.contains("pop"));
     assert!(stdout.contains("load_integer 0"));
     assert!(stdout.contains("return"));
 }

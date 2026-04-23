@@ -1,6 +1,7 @@
 use crate::ir::{
     IrBinaryOp, IrCompareOp, IrDeclaration, IrExpr, IrLogicalOp, IrProgram, IrStatement,
 };
+use std::collections::HashMap;
 use std::fmt::Write;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,16 +50,39 @@ pub enum LinearInstruction {
 }
 
 pub fn lower_program(program: &IrProgram) -> Result<LinearProgram, String> {
+    let function_return_types = collect_function_return_types(program);
     let functions = program
         .declarations
         .iter()
         .filter_map(|declaration| match declaration {
-            IrDeclaration::Function(function) => Some(lower_function(function)),
+            IrDeclaration::Function(function) => {
+                Some(lower_function(function, &function_return_types))
+            }
             IrDeclaration::Record(_) => None,
         })
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(LinearProgram { functions })
+}
+
+fn collect_function_return_types(program: &IrProgram) -> HashMap<String, String> {
+    let mut return_types = HashMap::from([
+        ("io.print_line".to_string(), "void".to_string()),
+        (
+            "random.from_seed".to_string(),
+            "standard.random.generator".to_string(),
+        ),
+        ("random.next_integer".to_string(), "integer".to_string()),
+        ("event.push_hit".to_string(), "void".to_string()),
+    ]);
+
+    for declaration in &program.declarations {
+        if let IrDeclaration::Function(function) = declaration {
+            return_types.insert(function.name.clone(), function.return_type.clone());
+        }
+    }
+
+    return_types
 }
 
 pub fn render_program(program: &LinearProgram) -> String {
@@ -133,11 +157,19 @@ impl LoweringContext {
     }
 }
 
-fn lower_function(function: &crate::ir::IrFunction) -> Result<LinearFunction, String> {
+fn lower_function(
+    function: &crate::ir::IrFunction,
+    function_return_types: &HashMap<String, String>,
+) -> Result<LinearFunction, String> {
     let mut instructions = Vec::new();
     let mut context = LoweringContext::new(&function.name);
     for statement in &function.body {
-        lower_statement(statement, &mut instructions, &mut context)?;
+        lower_statement(
+            statement,
+            &mut instructions,
+            &mut context,
+            function_return_types,
+        )?;
     }
 
     Ok(LinearFunction {
@@ -150,6 +182,7 @@ fn lower_statement(
     statement: &IrStatement,
     instructions: &mut Vec<LinearInstruction>,
     context: &mut LoweringContext,
+    function_return_types: &HashMap<String, String>,
 ) -> Result<(), String> {
     match statement {
         IrStatement::Let { name, value } | IrStatement::Mutable { name, value, .. } => {
@@ -171,12 +204,12 @@ fn lower_statement(
             lower_expression(condition, instructions)?;
             instructions.push(LinearInstruction::JumpIfFalse(else_label.clone()));
             for nested in then_body {
-                lower_statement(nested, instructions, context)?;
+                lower_statement(nested, instructions, context, function_return_types)?;
             }
             instructions.push(LinearInstruction::Jump(end_label.clone()));
             instructions.push(LinearInstruction::Label(else_label));
             for nested in else_body {
-                lower_statement(nested, instructions, context)?;
+                lower_statement(nested, instructions, context, function_return_types)?;
             }
             instructions.push(LinearInstruction::Label(end_label));
         }
@@ -188,7 +221,7 @@ fn lower_statement(
             lower_expression(condition, instructions)?;
             instructions.push(LinearInstruction::JumpIfFalse(end_label.clone()));
             for nested in body {
-                lower_statement(nested, instructions, context)?;
+                lower_statement(nested, instructions, context, function_return_types)?;
             }
             instructions.push(LinearInstruction::Jump(start_label));
             instructions.push(LinearInstruction::Label(end_label));
@@ -201,11 +234,26 @@ fn lower_statement(
         }
         IrStatement::Expr { value } => {
             lower_expression(value, instructions)?;
-            instructions.push(LinearInstruction::Pop);
+            if expression_produces_value(value, function_return_types) {
+                instructions.push(LinearInstruction::Pop);
+            }
         }
     }
 
     Ok(())
+}
+
+fn expression_produces_value(
+    expression: &IrExpr,
+    function_return_types: &HashMap<String, String>,
+) -> bool {
+    match expression {
+        IrExpr::Call { callee, .. } => function_return_types
+            .get(&callee.join("."))
+            .map(|return_type| return_type != "void")
+            .unwrap_or(true),
+        _ => true,
+    }
 }
 
 fn lower_expression(
@@ -389,6 +437,39 @@ define function main takes ready as boolean returns integer
                         LinearInstruction::Jump("main_loop_start_0".to_string()),
                         LinearInstruction::Label("main_loop_end_1".to_string()),
                         LinearInstruction::LoadReference(vec!["score".to_string()]),
+                        LinearInstruction::Return,
+                    ],
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn does_not_pop_void_builtin_expression_statements() {
+        let source = r#"module demo.lir
+
+define function main returns integer
+    io.print_line("Hello")
+    return 0
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let ir = lower_source_file(&file);
+        let linear = lower_program(&ir).expect("linear lowering should succeed");
+
+        assert_eq!(
+            linear,
+            LinearProgram {
+                functions: vec![LinearFunction {
+                    name: "main".to_string(),
+                    instructions: vec![
+                        LinearInstruction::LoadText("Hello".to_string()),
+                        LinearInstruction::Call {
+                            callee: vec!["io".to_string(), "print_line".to_string()],
+                            argument_count: 1,
+                        },
+                        LinearInstruction::LoadInteger(0),
                         LinearInstruction::Return,
                     ],
                 }],

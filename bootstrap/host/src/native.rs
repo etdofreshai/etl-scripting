@@ -205,6 +205,33 @@ fn render_linux_x86_64(program: &LinearProgram) -> String {
                 LinearInstruction::LoadReference(path)
                     if matches!(
                         function.instructions.get(instruction_index + 1),
+                        Some(LinearInstruction::Call {
+                            argument_count: 1,
+                            ..
+                        })
+                    ) && path.len() == 1 =>
+                {
+                    if let Some(consumed) = try_render_single_local_call(
+                        &mut output,
+                        &user_functions,
+                        &local_offsets,
+                        path,
+                        &function.instructions,
+                        instruction_index,
+                    ) {
+                        instruction_index += consumed;
+                    } else {
+                        writeln!(
+                            &mut output,
+                            "    {}",
+                            render_instruction(&function.instructions[instruction_index])
+                        )
+                        .unwrap();
+                    }
+                }
+                LinearInstruction::LoadReference(path)
+                    if matches!(
+                        function.instructions.get(instruction_index + 1),
                         Some(LinearInstruction::Return)
                     ) && path.len() == 1 =>
                 {
@@ -575,6 +602,37 @@ fn try_render_integer_immediate_call(
     Some(values.len())
 }
 
+fn try_render_single_local_call(
+    output: &mut String,
+    user_functions: &[String],
+    local_offsets: &BTreeMap<String, usize>,
+    path: &[String],
+    instructions: &[LinearInstruction],
+    instruction_index: usize,
+) -> Option<usize> {
+    let offset = *local_offsets.get(&path[0])?;
+    let callee = match instructions.get(instruction_index + 1) {
+        Some(LinearInstruction::Call {
+            callee,
+            argument_count: 1,
+        }) if callee.len() == 1 && user_functions.contains(&callee[0]) => callee,
+        _ => return None,
+    };
+
+    writeln!(output, "    mov rdi, qword [rbp-{offset}]").unwrap();
+    writeln!(output, "    call {}", native_symbol_name(&callee.join("."))).unwrap();
+    Some(1)
+}
+
+fn arithmetic_mnemonic(instruction: &LinearInstruction) -> Option<&'static str> {
+    match instruction {
+        LinearInstruction::Add => Some("add"),
+        LinearInstruction::Subtract => Some("sub"),
+        LinearInstruction::Multiply => Some("imul"),
+        _ => None,
+    }
+}
+
 fn try_render_integer_local_initializer(
     output: &mut String,
     local_offsets: &BTreeMap<String, usize>,
@@ -699,15 +757,6 @@ fn try_render_immediate_local_integer_update(
             }
             _ => None,
         },
-        _ => None,
-    }
-}
-
-fn arithmetic_mnemonic(instruction: &LinearInstruction) -> Option<&'static str> {
-    match instruction {
-        LinearInstruction::Add => Some("add"),
-        LinearInstruction::Subtract => Some("sub"),
-        LinearInstruction::Multiply => Some("imul"),
         _ => None,
     }
 }
@@ -866,6 +915,32 @@ define function main returns integer
         assert!(native.contains("    mov rsp, rbp"));
         assert!(native.contains("    pop rbp"));
         assert!(native.contains("    ret"));
+    }
+
+    #[test]
+    fn lowers_single_local_argument_user_calls() {
+        let source = r#"module demo.native
+
+define function helper takes value as integer returns integer
+    return value
+
+define function main returns integer
+    mutable n as integer be 7
+    return helper(n)
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let ir = lower_source_file(&file);
+        let linear = lower_program(&ir).expect("linear lowering should succeed");
+        let native =
+            render_program(&linear, "linux-x86_64").expect("native rendering should succeed");
+
+        assert!(native.contains("main:"));
+        assert!(native.contains("    mov qword [rbp-8], 7"));
+        assert!(native.contains("    mov rdi, qword [rbp-8]"));
+        assert!(native.contains("    call helper"));
+        assert!(!native.contains("load n"));
     }
 
     #[test]

@@ -278,7 +278,16 @@ fn render_linux_x86_64(program: &LinearProgram) -> String {
                         Some(LinearInstruction::LoadInteger(_))
                     ) && path.len() == 1 =>
                 {
-                    if let Some(consumed) = try_render_local_compare_branch(
+                    if let Some(consumed) = try_render_local_compute_call(
+                        &mut output,
+                        &user_functions,
+                        &local_offsets,
+                        path,
+                        &function.instructions,
+                        instruction_index,
+                    ) {
+                        instruction_index += consumed;
+                    } else if let Some(consumed) = try_render_local_compare_branch(
                         &mut output,
                         &local_offsets,
                         path,
@@ -721,6 +730,39 @@ fn try_render_single_local_call(
     Some(1)
 }
 
+fn try_render_local_compute_call(
+    output: &mut String,
+    user_functions: &[String],
+    local_offsets: &BTreeMap<String, usize>,
+    path: &[String],
+    instructions: &[LinearInstruction],
+    instruction_index: usize,
+) -> Option<usize> {
+    let offset = *local_offsets.get(&path[0])?;
+    let value = match instructions.get(instruction_index + 1) {
+        Some(LinearInstruction::LoadInteger(value)) => *value,
+        _ => return None,
+    };
+    let callee = match (
+        instructions.get(instruction_index + 2)?,
+        instructions.get(instruction_index + 3)?,
+    ) {
+        (
+            LinearInstruction::Add,
+            LinearInstruction::Call {
+                callee,
+                argument_count: 1,
+            },
+        ) if callee.len() == 1 && user_functions.contains(&callee[0]) => callee,
+        _ => return None,
+    };
+
+    writeln!(output, "    mov rdi, qword [rbp-{offset}]").unwrap();
+    writeln!(output, "    add rdi, {value}").unwrap();
+    writeln!(output, "    call {}", native_symbol_name(&callee.join("."))).unwrap();
+    Some(3)
+}
+
 fn arithmetic_mnemonic(instruction: &LinearInstruction) -> Option<&'static str> {
     match instruction {
         LinearInstruction::Add => Some("add"),
@@ -1038,6 +1080,34 @@ define function main returns integer
         assert!(native.contains("    mov rdi, qword [rbp-8]"));
         assert!(native.contains("    call helper"));
         assert!(!native.contains("load n"));
+    }
+
+    #[test]
+    fn lowers_computed_single_argument_user_calls() {
+        let source = r#"module demo.native
+
+define function helper takes value as integer returns integer
+    return value
+
+define function main returns integer
+    mutable n as integer be 5
+    return helper(n + 1)
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let ir = lower_source_file(&file);
+        let linear = lower_program(&ir).expect("linear lowering should succeed");
+        let native =
+            render_program(&linear, "linux-x86_64").expect("native rendering should succeed");
+
+        assert!(native.contains("main:"));
+        assert!(native.contains("    mov qword [rbp-8], 5"));
+        assert!(native.contains("    mov rdi, qword [rbp-8]"));
+        assert!(native.contains("    add rdi, 1"));
+        assert!(native.contains("    call helper"));
+        assert!(!native.contains("load n"));
+        assert!(!native.contains("add_pop"));
     }
 
     #[test]

@@ -52,7 +52,7 @@ pub enum IrStatement {
         value: String,
     },
     Set {
-        target: String,
+        target: Vec<String>,
         value: String,
     },
     If {
@@ -135,6 +135,13 @@ fn lower_statements(statements: &[Statement]) -> Vec<IrStatement> {
     statements.iter().map(lower_statement).collect()
 }
 
+fn lower_reference_path(reference: &str) -> Vec<String> {
+    reference
+        .split('.')
+        .map(|segment| segment.to_string())
+        .collect()
+}
+
 fn lower_statement(statement: &Statement) -> IrStatement {
     match statement {
         Statement::Let { name, value } => IrStatement::Let {
@@ -151,7 +158,7 @@ fn lower_statement(statement: &Statement) -> IrStatement {
             value: value.clone(),
         },
         Statement::Set { target, value } => IrStatement::Set {
-            target: target.clone(),
+            target: lower_reference_path(target),
             value: value.clone(),
         },
         Statement::If {
@@ -237,7 +244,13 @@ fn render_statement(output: &mut String, statement: &IrStatement, indent: usize)
             )?;
         }
         IrStatement::Set { target, value } => {
-            writeln!(output, "{}set {} = {}", indent_text(indent), target, value)?;
+            writeln!(
+                output,
+                "{}set {} = {}",
+                indent_text(indent),
+                target.join("."),
+                value
+            )?;
         }
         IrStatement::If {
             condition,
@@ -310,5 +323,36 @@ define function main takes ready as boolean returns integer
         assert!(rendered.contains("expr io.print_line(\"go\")"));
         assert!(rendered.contains("repeat_while false"));
         assert!(rendered.contains("return 0"));
+    }
+
+    #[test]
+    fn lowers_set_targets_as_reference_paths() {
+        let source = r#"module demo.ir_paths
+
+define record counter
+    value as integer
+
+define function main returns integer
+    mutable state as counter be counter(value 1)
+    set state.value to 2
+    return state.value
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let program = lower_source_file(&file);
+
+        let function = match &program.declarations[1] {
+            super::IrDeclaration::Function(function) => function,
+            other => panic!("expected function declaration, got {other:?}"),
+        };
+
+        match &function.body[1] {
+            super::IrStatement::Set { target, value } => {
+                assert_eq!(target, &vec!["state".to_string(), "value".to_string()]);
+                assert_eq!(value, "2");
+            }
+            other => panic!("expected set statement, got {other:?}"),
+        }
     }
 }

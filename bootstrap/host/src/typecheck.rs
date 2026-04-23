@@ -23,6 +23,12 @@ pub fn validate_source_file(file: &SourceFile) -> Result<(), String> {
     for declaration in &file.declarations {
         match declaration {
             Declaration::Record(record) => {
+                if BUILTIN_TYPES.contains(&record.name.as_str()) {
+                    return Err(format!(
+                        "declaration name `{}` conflicts with builtin type",
+                        record.name
+                    ));
+                }
                 if !seen_declaration_names.insert(record.name.clone()) {
                     return Err(format!("duplicate declaration name `{}`", record.name));
                 }
@@ -51,6 +57,12 @@ pub fn validate_source_file(file: &SourceFile) -> Result<(), String> {
                 );
             }
             Declaration::Function(function) => {
+                if BUILTIN_TYPES.contains(&function.name.as_str()) {
+                    return Err(format!(
+                        "declaration name `{}` conflicts with builtin type",
+                        function.name
+                    ));
+                }
                 if !seen_declaration_names.insert(function.name.clone()) {
                     return Err(format!("duplicate declaration name `{}`", function.name));
                 }
@@ -897,6 +909,22 @@ define function entity returns integer
         let error =
             validate_source_file(&file).expect_err("declaration name collision should fail");
         assert!(error.contains("duplicate declaration name `entity`"));
+    }
+
+    #[test]
+    fn rejects_declarations_named_after_builtin_types() {
+        let source = r#"module demo.builtin_name_collision
+
+define record integer
+    value as integer
+
+define function main returns integer
+    return 0
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        let error = validate_source_file(&file).expect_err("builtin type name should fail");
+        assert!(error.contains("declaration name `integer` conflicts with builtin type"));
     }
 
     #[test]

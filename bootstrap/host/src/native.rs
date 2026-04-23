@@ -67,6 +67,28 @@ fn render_linux_x86_64(program: &LinearProgram) -> String {
                 {
                     writeln!(&mut output, "    mov rax, {value}").unwrap();
                 }
+                LinearInstruction::LoadInteger(_)
+                    if matches!(
+                        function.instructions.get(instruction_index + 1),
+                        Some(LinearInstruction::LoadInteger(_))
+                    ) =>
+                {
+                    if let Some(consumed) = try_render_integer_local_initializer(
+                        &mut output,
+                        &local_offsets,
+                        &function.instructions,
+                        instruction_index,
+                    ) {
+                        instruction_index += consumed;
+                    } else {
+                        writeln!(
+                            &mut output,
+                            "    {}",
+                            render_instruction(&function.instructions[instruction_index])
+                        )
+                        .unwrap();
+                    }
+                }
                 LinearInstruction::LoadInteger(value)
                     if matches!(
                         function.instructions.get(instruction_index + 1),
@@ -231,6 +253,51 @@ fn try_render_local_compare_branch(
     writeln!(output, "    cmp rax, {value}").unwrap();
     writeln!(output, "    {jump} {label}").unwrap();
     Some(3)
+}
+
+fn try_render_integer_local_initializer(
+    output: &mut String,
+    local_offsets: &BTreeMap<String, usize>,
+    instructions: &[LinearInstruction],
+    instruction_index: usize,
+) -> Option<usize> {
+    let left = match instructions.get(instruction_index) {
+        Some(LinearInstruction::LoadInteger(value)) => *value,
+        _ => return None,
+    };
+    let right = match instructions.get(instruction_index + 1) {
+        Some(LinearInstruction::LoadInteger(value)) => *value,
+        _ => return None,
+    };
+
+    match instructions.get(instruction_index + 2)? {
+        instruction if arithmetic_mnemonic(instruction).is_some() => {
+            let mnemonic = arithmetic_mnemonic(instruction).expect("mnemonic should exist");
+            match instructions.get(instruction_index + 3) {
+                Some(LinearInstruction::StoreLocal(name)) => {
+                    let offset = *local_offsets.get(name)?;
+                    writeln!(output, "    mov rax, {left}").unwrap();
+                    writeln!(output, "    {mnemonic} rax, {right}").unwrap();
+                    writeln!(output, "    mov qword [rbp-{offset}], rax").unwrap();
+                    Some(3)
+                }
+                _ => None,
+            }
+        }
+        LinearInstruction::Divide => match instructions.get(instruction_index + 3) {
+            Some(LinearInstruction::StoreLocal(name)) => {
+                let offset = *local_offsets.get(name)?;
+                writeln!(output, "    mov rax, {left}").unwrap();
+                writeln!(output, "    cqo").unwrap();
+                writeln!(output, "    mov rcx, {right}").unwrap();
+                writeln!(output, "    idiv rcx").unwrap();
+                writeln!(output, "    mov qword [rbp-{offset}], rax").unwrap();
+                Some(3)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn arithmetic_mnemonic(instruction: &LinearInstruction) -> Option<&'static str> {
@@ -423,6 +490,31 @@ define function main returns integer
         assert!(native.contains("    mov rax, qword [rbp-8]"));
         assert!(!native.contains("store_local_pop score"));
         assert!(!native.contains("store_pop score"));
+        assert!(!native.contains("add_pop"));
+    }
+
+    #[test]
+    fn lowers_integer_local_add_initializer_into_stack_slot() {
+        let source = r#"module demo.native
+
+define function main returns integer
+    mutable score as integer be 1 + 2
+    return score
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let ir = lower_source_file(&file);
+        let linear = lower_program(&ir).expect("linear lowering should succeed");
+        let native =
+            render_program(&linear, "linux-x86_64").expect("native rendering should succeed");
+
+        assert!(native.contains("    sub rsp, 8"));
+        assert!(native.contains("    mov rax, 1"));
+        assert!(native.contains("    add rax, 2"));
+        assert!(native.contains("    mov qword [rbp-8], rax"));
+        assert!(native.contains("    mov rax, qword [rbp-8]"));
+        assert!(!native.contains("store_local_pop score"));
         assert!(!native.contains("add_pop"));
     }
 

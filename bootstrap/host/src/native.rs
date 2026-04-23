@@ -113,30 +113,14 @@ fn render_linux_x86_64(program: &LinearProgram) -> String {
                         instruction_index,
                     ) {
                         instruction_index += consumed;
-                    } else if let (
-                        Some(offset),
-                        Some(LinearInstruction::LoadInteger(value)),
-                        Some(LinearInstruction::Add),
-                        Some(LinearInstruction::StoreReference(target)),
-                    ) = (
-                        local_offsets.get(&path[0]),
-                        function.instructions.get(instruction_index + 1),
-                        function.instructions.get(instruction_index + 2),
-                        function.instructions.get(instruction_index + 3),
+                    } else if let Some(consumed) = try_render_local_integer_update(
+                        &mut output,
+                        &local_offsets,
+                        path,
+                        &function.instructions,
+                        instruction_index,
                     ) {
-                        if target.len() == 1 && target[0] == path[0] {
-                            writeln!(&mut output, "    mov rax, qword [rbp-{offset}]").unwrap();
-                            writeln!(&mut output, "    add rax, {value}").unwrap();
-                            writeln!(&mut output, "    mov qword [rbp-{offset}], rax").unwrap();
-                            instruction_index += 3;
-                        } else {
-                            writeln!(
-                                &mut output,
-                                "    {}",
-                                render_instruction(&function.instructions[instruction_index])
-                            )
-                            .unwrap();
-                        }
+                        instruction_index += consumed;
                     } else {
                         writeln!(
                             &mut output,
@@ -247,6 +231,46 @@ fn try_render_local_compare_branch(
     writeln!(output, "    cmp rax, {value}").unwrap();
     writeln!(output, "    {jump} {label}").unwrap();
     Some(3)
+}
+
+fn arithmetic_mnemonic(instruction: &LinearInstruction) -> Option<&'static str> {
+    match instruction {
+        LinearInstruction::Add => Some("add"),
+        LinearInstruction::Subtract => Some("sub"),
+        LinearInstruction::Multiply => Some("imul"),
+        _ => None,
+    }
+}
+
+fn try_render_local_integer_update(
+    output: &mut String,
+    local_offsets: &BTreeMap<String, usize>,
+    path: &[String],
+    instructions: &[LinearInstruction],
+    instruction_index: usize,
+) -> Option<usize> {
+    if path.len() != 1 {
+        return None;
+    }
+
+    let offset = *local_offsets.get(&path[0])?;
+    let value = match instructions.get(instruction_index + 1) {
+        Some(LinearInstruction::LoadInteger(value)) => *value,
+        _ => return None,
+    };
+    let mnemonic = arithmetic_mnemonic(instructions.get(instruction_index + 2)?)?;
+
+    match instructions.get(instruction_index + 3) {
+        Some(LinearInstruction::StoreReference(target))
+            if target.len() == 1 && target[0] == path[0] =>
+        {
+            writeln!(output, "    mov rax, qword [rbp-{offset}]").unwrap();
+            writeln!(output, "    {mnemonic} rax, {value}").unwrap();
+            writeln!(output, "    mov qword [rbp-{offset}], rax").unwrap();
+            Some(3)
+        }
+        _ => None,
+    }
 }
 
 fn collect_string_literals(program: &LinearProgram) -> Vec<(String, String)> {
@@ -382,6 +406,33 @@ define function main returns integer
         assert!(!native.contains("store_local_pop score"));
         assert!(!native.contains("store_pop score"));
         assert!(!native.contains("add_pop"));
+    }
+
+    #[test]
+    fn lowers_integer_local_subtraction_updates_into_stack_slots() {
+        let source = r#"module demo.native
+
+define function main returns integer
+    mutable score as integer be 5
+    set score to score - 2
+    return score
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let ir = lower_source_file(&file);
+        let linear = lower_program(&ir).expect("linear lowering should succeed");
+        let native =
+            render_program(&linear, "linux-x86_64").expect("native rendering should succeed");
+
+        assert!(native.contains("    sub rsp, 8"));
+        assert!(native.contains("    mov qword [rbp-8], 5"));
+        assert!(native.contains("    mov rax, qword [rbp-8]"));
+        assert!(native.contains("    sub rax, 2"));
+        assert!(native.contains("    mov qword [rbp-8], rax"));
+        assert!(native.contains("    mov rax, qword [rbp-8]"));
+        assert!(!native.contains("store_pop score"));
+        assert!(!native.contains("sub_pop"));
     }
 
     #[test]

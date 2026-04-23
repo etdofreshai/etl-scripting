@@ -46,6 +46,10 @@ pub enum IrExpr {
     Boolean(bool),
     Text(String),
     Reference(Vec<String>),
+    Call {
+        callee: Vec<String>,
+        arguments: Vec<IrExpr>,
+    },
     Opaque(String),
 }
 
@@ -154,6 +158,10 @@ fn lower_reference_path(reference: &str) -> Vec<String> {
 fn lower_expression(expression: &str) -> IrExpr {
     let expression = expression.trim();
 
+    if let Some(call) = lower_call_expression(expression) {
+        return call;
+    }
+
     if let Ok(value) = expression.parse::<i64>() {
         return IrExpr::Integer(value);
     }
@@ -175,6 +183,57 @@ fn lower_expression(expression: &str) -> IrExpr {
     }
 
     IrExpr::Opaque(expression.to_string())
+}
+
+fn lower_call_expression(expression: &str) -> Option<IrExpr> {
+    let open_paren = expression.find('(')?;
+    if !expression.ends_with(')') {
+        return None;
+    }
+
+    let callee = expression[..open_paren].trim();
+    if !is_reference_path(callee) {
+        return None;
+    }
+
+    let arguments_source = &expression[open_paren + 1..expression.len() - 1];
+    let arguments = split_top_level_arguments(arguments_source)
+        .into_iter()
+        .map(|argument| lower_expression(&argument))
+        .collect();
+
+    Some(IrExpr::Call {
+        callee: lower_reference_path(callee),
+        arguments,
+    })
+}
+
+fn split_top_level_arguments(arguments: &str) -> Vec<String> {
+    if arguments.trim().is_empty() {
+        return Vec::new();
+    }
+
+    let mut result = Vec::new();
+    let mut depth = 0;
+    let mut start = 0;
+    let mut in_text = false;
+    let chars: Vec<char> = arguments.chars().collect();
+
+    for (index, ch) in chars.iter().enumerate() {
+        match ch {
+            '"' => in_text = !in_text,
+            '(' if !in_text => depth += 1,
+            ')' if !in_text => depth -= 1,
+            ',' if !in_text && depth == 0 => {
+                result.push(arguments[start..index].trim().to_string());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+
+    result.push(arguments[start..].trim().to_string());
+    result
 }
 
 fn is_reference_path(expression: &str) -> bool {
@@ -365,6 +424,15 @@ fn render_expression(expression: &IrExpr) -> String {
         IrExpr::Boolean(value) => value.to_string(),
         IrExpr::Text(value) => format!("\"{value}\""),
         IrExpr::Reference(path) => path.join("."),
+        IrExpr::Call { callee, arguments } => format!(
+            "{}({})",
+            callee.join("."),
+            arguments
+                .iter()
+                .map(render_expression)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         IrExpr::Opaque(source) => source.clone(),
     }
 }
@@ -407,6 +475,27 @@ define function main takes ready as boolean returns integer
         assert!(rendered.contains("expr io.print_line(\"go\")"));
         assert!(rendered.contains("repeat_while false"));
         assert!(rendered.contains("return 0"));
+
+        let function = match &program.declarations[0] {
+            super::IrDeclaration::Function(function) => function,
+            other => panic!("expected function declaration, got {other:?}"),
+        };
+
+        match &function.body[0] {
+            super::IrStatement::If { then_body, .. } => match &then_body[0] {
+                super::IrStatement::Expr { value } => {
+                    assert_eq!(
+                        value,
+                        &IrExpr::Call {
+                            callee: vec!["io".to_string(), "print_line".to_string()],
+                            arguments: vec![IrExpr::Text("go".to_string())],
+                        }
+                    );
+                }
+                other => panic!("expected expression statement, got {other:?}"),
+            },
+            other => panic!("expected if statement, got {other:?}"),
+        }
     }
 
     #[test]

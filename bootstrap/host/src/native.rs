@@ -1183,6 +1183,34 @@ define function main returns integer
     }
 
     #[test]
+    fn lowers_subtracted_single_argument_user_calls() {
+        let source = r#"module demo.native
+
+define function helper takes value as integer returns integer
+    return value
+
+define function main returns integer
+    mutable n as integer be 5
+    return helper(n - 2)
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let ir = lower_source_file(&file);
+        let linear = lower_program(&ir).expect("linear lowering should succeed");
+        let native =
+            render_program(&linear, "linux-x86_64").expect("native rendering should succeed");
+
+        assert!(native.contains("main:"));
+        assert!(native.contains("    mov qword [rbp-8], 5"));
+        assert!(native.contains("    mov rdi, qword [rbp-8]"));
+        assert!(native.contains("    sub rdi, 2"));
+        assert!(native.contains("    call helper"));
+        assert!(!native.contains("load n"));
+        assert!(!native.contains("sub_pop"));
+    }
+
+    #[test]
     fn lowers_single_integer_argument_user_calls() {
         let source = r#"module demo.native
 

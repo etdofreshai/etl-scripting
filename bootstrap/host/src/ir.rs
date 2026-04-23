@@ -41,11 +41,24 @@ pub struct IrParameter {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IrBinaryOp {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IrExpr {
     Integer(i64),
     Boolean(bool),
     Text(String),
     Reference(Vec<String>),
+    Binary {
+        left: Box<IrExpr>,
+        op: IrBinaryOp,
+        right: Box<IrExpr>,
+    },
     Call {
         callee: Vec<String>,
         arguments: Vec<IrExpr>,
@@ -158,6 +171,10 @@ fn lower_reference_path(reference: &str) -> Vec<String> {
 fn lower_expression(expression: &str) -> IrExpr {
     let expression = expression.trim();
 
+    if let Some(binary) = lower_binary_expression(expression) {
+        return binary;
+    }
+
     if let Some(call) = lower_call_expression(expression) {
         return call;
     }
@@ -178,11 +195,103 @@ fn lower_expression(expression: &str) -> IrExpr {
         return IrExpr::Text(expression[1..expression.len() - 1].to_string());
     }
 
+    if is_parenthesized(expression) {
+        return lower_expression(&expression[1..expression.len() - 1]);
+    }
+
     if is_reference_path(expression) {
         return IrExpr::Reference(lower_reference_path(expression));
     }
 
     IrExpr::Opaque(expression.to_string())
+}
+
+fn lower_binary_expression(expression: &str) -> Option<IrExpr> {
+    for operators in [&["+", "-"][..], &["*", "/"][..]] {
+        if let Some((left, operator, right)) = split_top_level_binary(expression, operators) {
+            let op = match operator.as_str() {
+                "+" => IrBinaryOp::Add,
+                "-" => IrBinaryOp::Subtract,
+                "*" => IrBinaryOp::Multiply,
+                "/" => IrBinaryOp::Divide,
+                _ => unreachable!("unexpected operator"),
+            };
+            return Some(IrExpr::Binary {
+                left: Box::new(lower_expression(&left)),
+                op,
+                right: Box::new(lower_expression(&right)),
+            });
+        }
+    }
+    None
+}
+
+fn split_top_level_binary(
+    expression: &str,
+    operators: &[&str],
+) -> Option<(String, String, String)> {
+    let chars: Vec<char> = expression.chars().collect();
+    let mut depth = 0;
+    let mut in_text = false;
+
+    for index in (0..chars.len()).rev() {
+        let ch = chars[index];
+        match ch {
+            '"' => in_text = !in_text,
+            ')' if !in_text => depth += 1,
+            '(' if !in_text => depth -= 1,
+            _ => {}
+        }
+
+        if in_text || depth != 0 {
+            continue;
+        }
+
+        for operator in operators {
+            if operator.len() != 1 {
+                continue;
+            }
+            let op_char = operator.chars().next().unwrap();
+            if ch != op_char {
+                continue;
+            }
+            if index == 0 {
+                continue;
+            }
+            let left = expression[..index].trim();
+            let right = expression[index + 1..].trim();
+            if left.is_empty() || right.is_empty() {
+                continue;
+            }
+            return Some((left.to_string(), operator.to_string(), right.to_string()));
+        }
+    }
+
+    None
+}
+
+fn is_parenthesized(expression: &str) -> bool {
+    if !expression.starts_with('(') || !expression.ends_with(')') {
+        return false;
+    }
+
+    let mut depth = 0;
+    let mut in_text = false;
+    for (index, ch) in expression.char_indices() {
+        match ch {
+            '"' => in_text = !in_text,
+            '(' if !in_text => depth += 1,
+            ')' if !in_text => {
+                depth -= 1;
+                if depth == 0 && index != expression.len() - 1 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    depth == 0 && !in_text
 }
 
 fn lower_call_expression(expression: &str) -> Option<IrExpr> {
@@ -424,6 +533,12 @@ fn render_expression(expression: &IrExpr) -> String {
         IrExpr::Boolean(value) => value.to_string(),
         IrExpr::Text(value) => format!("\"{value}\""),
         IrExpr::Reference(path) => path.join("."),
+        IrExpr::Binary { left, op, right } => format!(
+            "{} {} {}",
+            render_expression_with_precedence(left, binary_precedence(op)),
+            render_binary_op(op),
+            render_expression_with_precedence(right, binary_precedence(op) + 1)
+        ),
         IrExpr::Call { callee, arguments } => format!(
             "{}({})",
             callee.join("."),
@@ -437,13 +552,38 @@ fn render_expression(expression: &IrExpr) -> String {
     }
 }
 
+fn render_expression_with_precedence(expression: &IrExpr, parent_precedence: u8) -> String {
+    match expression {
+        IrExpr::Binary { op, .. } if binary_precedence(op) < parent_precedence => {
+            format!("({})", render_expression(expression))
+        }
+        _ => render_expression(expression),
+    }
+}
+
+fn render_binary_op(op: &IrBinaryOp) -> &'static str {
+    match op {
+        IrBinaryOp::Add => "+",
+        IrBinaryOp::Subtract => "-",
+        IrBinaryOp::Multiply => "*",
+        IrBinaryOp::Divide => "/",
+    }
+}
+
+fn binary_precedence(op: &IrBinaryOp) -> u8 {
+    match op {
+        IrBinaryOp::Add | IrBinaryOp::Subtract => 1,
+        IrBinaryOp::Multiply | IrBinaryOp::Divide => 2,
+    }
+}
+
 fn indent_text(indent: usize) -> String {
     "    ".repeat(indent)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{lower_source_file, render_program, IrExpr};
+    use super::{lower_source_file, render_program, IrBinaryOp, IrExpr};
     use crate::parser::parse_source;
     use crate::typecheck::validate_source_file;
 
@@ -536,6 +676,42 @@ define function main returns integer
                         "state".to_string(),
                         "value".to_string()
                     ]))
+                );
+            }
+            other => panic!("expected return statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lowers_binary_expressions_with_precedence() {
+        let source = r#"module demo.ir_binary
+
+define function main takes score as integer, bonus as integer returns integer
+    return score + bonus * 2
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let program = lower_source_file(&file);
+
+        let function = match &program.declarations[0] {
+            super::IrDeclaration::Function(function) => function,
+            other => panic!("expected function declaration, got {other:?}"),
+        };
+
+        match &function.body[0] {
+            super::IrStatement::Return { value } => {
+                assert_eq!(
+                    value,
+                    &Some(IrExpr::Binary {
+                        left: Box::new(IrExpr::Reference(vec!["score".to_string()])),
+                        op: IrBinaryOp::Add,
+                        right: Box::new(IrExpr::Binary {
+                            left: Box::new(IrExpr::Reference(vec!["bonus".to_string()])),
+                            op: IrBinaryOp::Multiply,
+                            right: Box::new(IrExpr::Integer(2)),
+                        }),
+                    })
                 );
             }
             other => panic!("expected return statement, got {other:?}"),

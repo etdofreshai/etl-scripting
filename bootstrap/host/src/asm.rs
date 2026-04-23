@@ -122,7 +122,7 @@ fn render_instruction(
         LinearInstruction::StoreLocal(name) => format!("store_local_pop {name}"),
         LinearInstruction::StoreReference(path) => format!("store_pop {}", path.join(".")),
         LinearInstruction::Jump(name) => format!("jmp {name}"),
-        LinearInstruction::JumpIfFalse(name) => format!("jmp_if_false {name}"),
+        LinearInstruction::JumpIfFalse(name) => format!("jmp_if_false_pop {name}"),
         LinearInstruction::Pop => "pop".to_string(),
         LinearInstruction::Return => match current_function_return_type {
             "void" => "return_void".to_string(),
@@ -161,9 +161,9 @@ define function main takes ready as boolean returns integer
         assert!(asm.contains("global main"));
         assert!(asm.contains("main:"));
         assert!(asm.contains("    load ready"));
-        assert!(asm.contains("    jmp_if_false main_if_else_0"));
+        assert!(asm.contains("    jmp_if_false_pop main_if_else_0"));
         assert!(asm.contains("main_if_else_0:"));
-        assert!(asm.contains("    ret"));
+        assert!(asm.contains("    return_value"));
     }
 
     #[test]

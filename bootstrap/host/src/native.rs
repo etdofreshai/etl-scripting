@@ -120,6 +120,32 @@ fn render_linux_x86_64(program: &LinearProgram) -> String {
                         .unwrap();
                     }
                 }
+                LinearInstruction::LoadInteger(_)
+                    if matches!(
+                        function.instructions.get(instruction_index + 1),
+                        Some(LinearInstruction::LoadReference(path)) if path.len() == 1
+                    ) && matches!(
+                        function.instructions.get(instruction_index + 2),
+                        Some(LinearInstruction::Call { .. })
+                    ) =>
+                {
+                    if let Some(consumed) = try_render_simple_user_call(
+                        &mut output,
+                        &user_functions,
+                        &local_offsets,
+                        &function.instructions,
+                        instruction_index,
+                    ) {
+                        instruction_index += consumed;
+                    } else {
+                        writeln!(
+                            &mut output,
+                            "    {}",
+                            render_instruction(&function.instructions[instruction_index])
+                        )
+                        .unwrap();
+                    }
+                }
                 LinearInstruction::LoadInteger(value)
                     if matches!(
                         function.instructions.get(instruction_index + 1),
@@ -602,6 +628,77 @@ fn try_render_integer_immediate_call(
     Some(values.len())
 }
 
+enum SimpleCallOperand {
+    Integer(i64),
+    LocalOffset(usize),
+}
+
+fn try_render_simple_user_call(
+    output: &mut String,
+    user_functions: &[String],
+    local_offsets: &BTreeMap<String, usize>,
+    instructions: &[LinearInstruction],
+    instruction_index: usize,
+) -> Option<usize> {
+    let mut operands = Vec::new();
+    let mut cursor = instruction_index;
+
+    loop {
+        match instructions.get(cursor) {
+            Some(LinearInstruction::LoadInteger(value)) => {
+                operands.push(SimpleCallOperand::Integer(*value));
+                cursor += 1;
+            }
+            Some(LinearInstruction::LoadReference(path)) if path.len() == 1 => {
+                let offset = *local_offsets.get(&path[0])?;
+                operands.push(SimpleCallOperand::LocalOffset(offset));
+                cursor += 1;
+            }
+            _ => break,
+        }
+    }
+
+    let callee = match instructions.get(cursor) {
+        Some(LinearInstruction::Call {
+            callee,
+            argument_count,
+        }) if *argument_count == operands.len()
+            && callee.len() == 1
+            && user_functions.contains(&callee[0]) =>
+        {
+            callee
+        }
+        _ => return None,
+    };
+
+    let register_arg_count = operands.len().min(6);
+    for (index, operand) in operands.iter().take(register_arg_count).enumerate() {
+        let register = integer_argument_register(index)?;
+        match operand {
+            SimpleCallOperand::Integer(value) => {
+                writeln!(output, "    mov {register}, {value}").unwrap();
+            }
+            SimpleCallOperand::LocalOffset(offset) => {
+                writeln!(output, "    mov {register}, qword [rbp-{offset}]").unwrap();
+            }
+        }
+    }
+    for operand in operands.iter().skip(register_arg_count).rev() {
+        match operand {
+            SimpleCallOperand::Integer(value) => writeln!(output, "    push {value}").unwrap(),
+            SimpleCallOperand::LocalOffset(offset) => {
+                writeln!(output, "    push qword [rbp-{offset}]").unwrap()
+            }
+        }
+    }
+    writeln!(output, "    call {}", native_symbol_name(&callee.join("."))).unwrap();
+    let stack_arg_count = operands.len().saturating_sub(register_arg_count);
+    if stack_arg_count > 0 {
+        writeln!(output, "    add rsp, {}", stack_arg_count * 8).unwrap();
+    }
+    Some(operands.len())
+}
+
 fn try_render_single_local_call(
     output: &mut String,
     user_functions: &[String],
@@ -970,6 +1067,34 @@ define function main returns integer
         assert!(native.contains("    call helper"));
         assert!(!native.contains("push_int 7"));
         assert!(!native.contains("load value"));
+    }
+
+    #[test]
+    fn lowers_mixed_immediate_and_local_two_argument_user_calls() {
+        let source = r#"module demo.native
+
+define function helper takes left as integer, right as integer returns integer
+    return left + right
+
+define function main returns integer
+    mutable n as integer be 5
+    return helper(7, n)
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let ir = lower_source_file(&file);
+        let linear = lower_program(&ir).expect("linear lowering should succeed");
+        let native =
+            render_program(&linear, "linux-x86_64").expect("native rendering should succeed");
+
+        assert!(native.contains("main:"));
+        assert!(native.contains("    sub rsp, 8"));
+        assert!(native.contains("    mov qword [rbp-8], 5"));
+        assert!(native.contains("    mov rdi, 7"));
+        assert!(native.contains("    mov rsi, qword [rbp-8]"));
+        assert!(native.contains("    call helper"));
+        assert!(!native.contains("load n"));
     }
 
     #[test]

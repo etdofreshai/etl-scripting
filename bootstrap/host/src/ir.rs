@@ -41,34 +41,43 @@ pub struct IrParameter {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IrExpr {
+    Integer(i64),
+    Boolean(bool),
+    Text(String),
+    Reference(Vec<String>),
+    Opaque(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IrStatement {
     Let {
         name: String,
-        value: String,
+        value: IrExpr,
     },
     Mutable {
         name: String,
         type_name: String,
-        value: String,
+        value: IrExpr,
     },
     Set {
         target: Vec<String>,
-        value: String,
+        value: IrExpr,
     },
     If {
-        condition: String,
+        condition: IrExpr,
         then_body: Vec<IrStatement>,
         else_body: Vec<IrStatement>,
     },
     RepeatWhile {
-        condition: String,
+        condition: IrExpr,
         body: Vec<IrStatement>,
     },
     Return {
-        value: Option<String>,
+        value: Option<IrExpr>,
     },
     Expr {
-        value: String,
+        value: IrExpr,
     },
 }
 
@@ -142,11 +151,50 @@ fn lower_reference_path(reference: &str) -> Vec<String> {
         .collect()
 }
 
+fn lower_expression(expression: &str) -> IrExpr {
+    let expression = expression.trim();
+
+    if let Ok(value) = expression.parse::<i64>() {
+        return IrExpr::Integer(value);
+    }
+
+    if expression == "true" {
+        return IrExpr::Boolean(true);
+    }
+
+    if expression == "false" {
+        return IrExpr::Boolean(false);
+    }
+
+    if expression.starts_with('"') && expression.ends_with('"') && expression.len() >= 2 {
+        return IrExpr::Text(expression[1..expression.len() - 1].to_string());
+    }
+
+    if is_reference_path(expression) {
+        return IrExpr::Reference(lower_reference_path(expression));
+    }
+
+    IrExpr::Opaque(expression.to_string())
+}
+
+fn is_reference_path(expression: &str) -> bool {
+    !expression.is_empty() && expression.split('.').all(|segment| is_identifier(segment))
+}
+
+fn is_identifier(segment: &str) -> bool {
+    let mut chars = segment.chars();
+    match chars.next() {
+        Some(ch) if ch.is_ascii_alphabetic() || ch == '_' => {}
+        _ => return false,
+    }
+    chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
 fn lower_statement(statement: &Statement) -> IrStatement {
     match statement {
         Statement::Let { name, value } => IrStatement::Let {
             name: name.clone(),
-            value: value.clone(),
+            value: lower_expression(value),
         },
         Statement::Mutable {
             name,
@@ -155,30 +203,30 @@ fn lower_statement(statement: &Statement) -> IrStatement {
         } => IrStatement::Mutable {
             name: name.clone(),
             type_name: value_type.name.clone(),
-            value: value.clone(),
+            value: lower_expression(value),
         },
         Statement::Set { target, value } => IrStatement::Set {
             target: lower_reference_path(target),
-            value: value.clone(),
+            value: lower_expression(value),
         },
         Statement::If {
             condition,
             then_body,
             else_body,
         } => IrStatement::If {
-            condition: condition.clone(),
+            condition: lower_expression(condition),
             then_body: lower_statements(then_body),
             else_body: lower_statements(else_body),
         },
         Statement::RepeatWhile { condition, body } => IrStatement::RepeatWhile {
-            condition: condition.clone(),
+            condition: lower_expression(condition),
             body: lower_statements(body),
         },
         Statement::Return { value } => IrStatement::Return {
-            value: value.clone(),
+            value: value.as_deref().map(lower_expression),
         },
         Statement::Expression { value } => IrStatement::Expr {
-            value: value.clone(),
+            value: lower_expression(value),
         },
     }
 }
@@ -227,7 +275,13 @@ fn render_declaration(
 fn render_statement(output: &mut String, statement: &IrStatement, indent: usize) -> fmt::Result {
     match statement {
         IrStatement::Let { name, value } => {
-            writeln!(output, "{}let {} = {}", indent_text(indent), name, value)?;
+            writeln!(
+                output,
+                "{}let {} = {}",
+                indent_text(indent),
+                name,
+                render_expression(value)
+            )?;
         }
         IrStatement::Mutable {
             name,
@@ -240,7 +294,7 @@ fn render_statement(output: &mut String, statement: &IrStatement, indent: usize)
                 indent_text(indent),
                 name,
                 type_name,
-                value
+                render_expression(value)
             )?;
         }
         IrStatement::Set { target, value } => {
@@ -249,7 +303,7 @@ fn render_statement(output: &mut String, statement: &IrStatement, indent: usize)
                 "{}set {} = {}",
                 indent_text(indent),
                 target.join("."),
-                value
+                render_expression(value)
             )?;
         }
         IrStatement::If {
@@ -257,7 +311,12 @@ fn render_statement(output: &mut String, statement: &IrStatement, indent: usize)
             then_body,
             else_body,
         } => {
-            writeln!(output, "{}if {}", indent_text(indent), condition)?;
+            writeln!(
+                output,
+                "{}if {}",
+                indent_text(indent),
+                render_expression(condition)
+            )?;
             for statement in then_body {
                 render_statement(output, statement, indent + 1)?;
             }
@@ -269,20 +328,45 @@ fn render_statement(output: &mut String, statement: &IrStatement, indent: usize)
             }
         }
         IrStatement::RepeatWhile { condition, body } => {
-            writeln!(output, "{}repeat_while {}", indent_text(indent), condition)?;
+            writeln!(
+                output,
+                "{}repeat_while {}",
+                indent_text(indent),
+                render_expression(condition)
+            )?;
             for statement in body {
                 render_statement(output, statement, indent + 1)?;
             }
         }
         IrStatement::Return { value } => match value {
-            Some(value) => writeln!(output, "{}return {}", indent_text(indent), value)?,
+            Some(value) => writeln!(
+                output,
+                "{}return {}",
+                indent_text(indent),
+                render_expression(value)
+            )?,
             None => writeln!(output, "{}return", indent_text(indent))?,
         },
         IrStatement::Expr { value } => {
-            writeln!(output, "{}expr {}", indent_text(indent), value)?;
+            writeln!(
+                output,
+                "{}expr {}",
+                indent_text(indent),
+                render_expression(value)
+            )?;
         }
     }
     Ok(())
+}
+
+fn render_expression(expression: &IrExpr) -> String {
+    match expression {
+        IrExpr::Integer(value) => value.to_string(),
+        IrExpr::Boolean(value) => value.to_string(),
+        IrExpr::Text(value) => format!("\"{value}\""),
+        IrExpr::Reference(path) => path.join("."),
+        IrExpr::Opaque(source) => source.clone(),
+    }
 }
 
 fn indent_text(indent: usize) -> String {
@@ -291,7 +375,7 @@ fn indent_text(indent: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{lower_source_file, render_program};
+    use super::{lower_source_file, render_program, IrExpr};
     use crate::parser::parse_source;
     use crate::typecheck::validate_source_file;
 
@@ -350,9 +434,22 @@ define function main returns integer
         match &function.body[1] {
             super::IrStatement::Set { target, value } => {
                 assert_eq!(target, &vec!["state".to_string(), "value".to_string()]);
-                assert_eq!(value, "2");
+                assert_eq!(value, &IrExpr::Integer(2));
             }
             other => panic!("expected set statement, got {other:?}"),
+        }
+
+        match &function.body[2] {
+            super::IrStatement::Return { value } => {
+                assert_eq!(
+                    value,
+                    &Some(IrExpr::Reference(vec![
+                        "state".to_string(),
+                        "value".to_string()
+                    ]))
+                );
+            }
+            other => panic!("expected return statement, got {other:?}"),
         }
     }
 }

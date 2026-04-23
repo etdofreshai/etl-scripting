@@ -105,81 +105,14 @@ fn render_linux_x86_64(program: &LinearProgram) -> String {
                         Some(LinearInstruction::LoadInteger(_))
                     ) && path.len() == 1 =>
                 {
-                    if let (
-                        Some(offset),
-                        Some(LinearInstruction::LoadInteger(value)),
-                        Some(LinearInstruction::CompareLess),
-                        Some(LinearInstruction::JumpIfFalse(label)),
-                    ) = (
-                        local_offsets.get(&path[0]),
-                        function.instructions.get(instruction_index + 1),
-                        function.instructions.get(instruction_index + 2),
-                        function.instructions.get(instruction_index + 3),
+                    if let Some(consumed) = try_render_local_compare_branch(
+                        &mut output,
+                        &local_offsets,
+                        path,
+                        &function.instructions,
+                        instruction_index,
                     ) {
-                        writeln!(&mut output, "    mov rax, qword [rbp-{offset}]").unwrap();
-                        writeln!(&mut output, "    cmp rax, {value}").unwrap();
-                        writeln!(&mut output, "    jge {label}").unwrap();
-                        instruction_index += 3;
-                    } else if let (
-                        Some(offset),
-                        Some(LinearInstruction::LoadInteger(value)),
-                        Some(LinearInstruction::CompareEqual),
-                        Some(LinearInstruction::JumpIfFalse(label)),
-                    ) = (
-                        local_offsets.get(&path[0]),
-                        function.instructions.get(instruction_index + 1),
-                        function.instructions.get(instruction_index + 2),
-                        function.instructions.get(instruction_index + 3),
-                    ) {
-                        writeln!(&mut output, "    mov rax, qword [rbp-{offset}]").unwrap();
-                        writeln!(&mut output, "    cmp rax, {value}").unwrap();
-                        writeln!(&mut output, "    jne {label}").unwrap();
-                        instruction_index += 3;
-                    } else if let (
-                        Some(offset),
-                        Some(LinearInstruction::LoadInteger(value)),
-                        Some(LinearInstruction::CompareGreater),
-                        Some(LinearInstruction::JumpIfFalse(label)),
-                    ) = (
-                        local_offsets.get(&path[0]),
-                        function.instructions.get(instruction_index + 1),
-                        function.instructions.get(instruction_index + 2),
-                        function.instructions.get(instruction_index + 3),
-                    ) {
-                        writeln!(&mut output, "    mov rax, qword [rbp-{offset}]").unwrap();
-                        writeln!(&mut output, "    cmp rax, {value}").unwrap();
-                        writeln!(&mut output, "    jle {label}").unwrap();
-                        instruction_index += 3;
-                    } else if let (
-                        Some(offset),
-                        Some(LinearInstruction::LoadInteger(value)),
-                        Some(LinearInstruction::CompareLessEqual),
-                        Some(LinearInstruction::JumpIfFalse(label)),
-                    ) = (
-                        local_offsets.get(&path[0]),
-                        function.instructions.get(instruction_index + 1),
-                        function.instructions.get(instruction_index + 2),
-                        function.instructions.get(instruction_index + 3),
-                    ) {
-                        writeln!(&mut output, "    mov rax, qword [rbp-{offset}]").unwrap();
-                        writeln!(&mut output, "    cmp rax, {value}").unwrap();
-                        writeln!(&mut output, "    jg {label}").unwrap();
-                        instruction_index += 3;
-                    } else if let (
-                        Some(offset),
-                        Some(LinearInstruction::LoadInteger(value)),
-                        Some(LinearInstruction::CompareGreaterEqual),
-                        Some(LinearInstruction::JumpIfFalse(label)),
-                    ) = (
-                        local_offsets.get(&path[0]),
-                        function.instructions.get(instruction_index + 1),
-                        function.instructions.get(instruction_index + 2),
-                        function.instructions.get(instruction_index + 3),
-                    ) {
-                        writeln!(&mut output, "    mov rax, qword [rbp-{offset}]").unwrap();
-                        writeln!(&mut output, "    cmp rax, {value}").unwrap();
-                        writeln!(&mut output, "    jl {label}").unwrap();
-                        instruction_index += 3;
+                        instruction_index += consumed;
                     } else if let (
                         Some(offset),
                         Some(LinearInstruction::LoadInteger(value)),
@@ -276,6 +209,46 @@ fn collect_local_offsets(function: &LinearFunction) -> BTreeMap<String, usize> {
     offsets
 }
 
+fn inverse_jump_for_compare(compare: &LinearInstruction) -> Option<&'static str> {
+    match compare {
+        LinearInstruction::CompareLess => Some("jge"),
+        LinearInstruction::CompareEqual => Some("jne"),
+        LinearInstruction::CompareGreater => Some("jle"),
+        LinearInstruction::CompareLessEqual => Some("jg"),
+        LinearInstruction::CompareGreaterEqual => Some("jl"),
+        _ => None,
+    }
+}
+
+fn try_render_local_compare_branch(
+    output: &mut String,
+    local_offsets: &BTreeMap<String, usize>,
+    path: &[String],
+    instructions: &[LinearInstruction],
+    instruction_index: usize,
+) -> Option<usize> {
+    if path.len() != 1 {
+        return None;
+    }
+
+    let offset = *local_offsets.get(&path[0])?;
+    let value = match instructions.get(instruction_index + 1) {
+        Some(LinearInstruction::LoadInteger(value)) => *value,
+        _ => return None,
+    };
+    let compare = instructions.get(instruction_index + 2)?;
+    let label = match instructions.get(instruction_index + 3) {
+        Some(LinearInstruction::JumpIfFalse(label)) => label,
+        _ => return None,
+    };
+    let jump = inverse_jump_for_compare(compare)?;
+
+    writeln!(output, "    mov rax, qword [rbp-{offset}]").unwrap();
+    writeln!(output, "    cmp rax, {value}").unwrap();
+    writeln!(output, "    {jump} {label}").unwrap();
+    Some(3)
+}
+
 fn collect_string_literals(program: &LinearProgram) -> Vec<(String, String)> {
     let mut literals = Vec::new();
     for function in &program.functions {
@@ -336,9 +309,9 @@ fn render_instruction(instruction: &LinearInstruction) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::render_program;
+    use super::{inverse_jump_for_compare, render_program};
     use crate::ir::lower_source_file;
-    use crate::lir::lower_program;
+    use crate::lir::{lower_program, LinearInstruction};
     use crate::parser::parse_source;
     use crate::typecheck::validate_source_file;
 
@@ -541,5 +514,30 @@ define function main returns integer
         assert!(native.contains("    jl main_if_else_0"));
         assert!(!native.contains("cmp_ge_pop"));
         assert!(!native.contains("jmp_if_false_pop main_if_else_0"));
+    }
+
+    #[test]
+    fn maps_compare_ops_to_inverse_jump_mnemonics() {
+        assert_eq!(
+            inverse_jump_for_compare(&LinearInstruction::CompareLess),
+            Some("jge")
+        );
+        assert_eq!(
+            inverse_jump_for_compare(&LinearInstruction::CompareEqual),
+            Some("jne")
+        );
+        assert_eq!(
+            inverse_jump_for_compare(&LinearInstruction::CompareGreater),
+            Some("jle")
+        );
+        assert_eq!(
+            inverse_jump_for_compare(&LinearInstruction::CompareLessEqual),
+            Some("jg")
+        );
+        assert_eq!(
+            inverse_jump_for_compare(&LinearInstruction::CompareGreaterEqual),
+            Some("jl")
+        );
+        assert_eq!(inverse_jump_for_compare(&LinearInstruction::Add), None);
     }
 }

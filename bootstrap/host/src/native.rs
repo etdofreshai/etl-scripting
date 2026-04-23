@@ -410,6 +410,12 @@ fn try_render_local_binary_return(
             writeln!(output, "    imul rax, qword [rbp-{right_offset}]").unwrap();
             Some(3)
         }
+        (LinearInstruction::Divide, LinearInstruction::Return) => {
+            writeln!(output, "    mov rax, qword [rbp-{left_offset}]").unwrap();
+            writeln!(output, "    cqo").unwrap();
+            writeln!(output, "    idiv qword [rbp-{right_offset}]").unwrap();
+            Some(3)
+        }
         _ => None,
     }
 }
@@ -867,6 +873,40 @@ define function main returns integer
         assert!(!native.contains("load left"));
         assert!(!native.contains("load right"));
         assert!(!native.contains("mul_pop"));
+    }
+
+    #[test]
+    fn lowers_two_integer_argument_user_calls_with_divide_body() {
+        let source = r#"module demo.native
+
+define function helper takes left as integer, right as integer returns integer
+    return left / right
+
+define function main returns integer
+    return helper(8, 2)
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let ir = lower_source_file(&file);
+        let linear = lower_program(&ir).expect("linear lowering should succeed");
+        let native =
+            render_program(&linear, "linux-x86_64").expect("native rendering should succeed");
+
+        assert!(native.contains("helper:"));
+        assert!(native.contains("    sub rsp, 16"));
+        assert!(native.contains("    mov qword [rbp-8], rdi"));
+        assert!(native.contains("    mov qword [rbp-16], rsi"));
+        assert!(native.contains("    mov rax, qword [rbp-8]"));
+        assert!(native.contains("    cqo"));
+        assert!(native.contains("    idiv qword [rbp-16]"));
+        assert!(native.contains("main:"));
+        assert!(native.contains("    mov rdi, 8"));
+        assert!(native.contains("    mov rsi, 2"));
+        assert!(native.contains("    call helper"));
+        assert!(!native.contains("load left"));
+        assert!(!native.contains("load right"));
+        assert!(!native.contains("div_pop"));
     }
 
     #[test]

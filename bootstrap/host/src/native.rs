@@ -170,7 +170,15 @@ fn render_linux_x86_64(program: &LinearProgram) -> String {
                         Some(LinearInstruction::LoadReference(other_path)) if other_path.len() == 1
                     ) && path.len() == 1 =>
                 {
-                    if let Some(consumed) = try_render_local_binary_return(
+                    if let Some(consumed) = try_render_local_compare_branch(
+                        &mut output,
+                        &local_offsets,
+                        path,
+                        &function.instructions,
+                        instruction_index,
+                    ) {
+                        instruction_index += consumed;
+                    } else if let Some(consumed) = try_render_local_binary_return(
                         &mut output,
                         &local_offsets,
                         path,
@@ -359,22 +367,33 @@ fn try_render_local_compare_branch(
         return None;
     }
 
-    let offset = *local_offsets.get(&path[0])?;
-    let value = match instructions.get(instruction_index + 1) {
-        Some(LinearInstruction::LoadInteger(value)) => *value,
-        _ => return None,
-    };
-    let compare = instructions.get(instruction_index + 2)?;
-    let label = match instructions.get(instruction_index + 3) {
-        Some(LinearInstruction::JumpIfFalse(label)) => label,
+    let left_offset = *local_offsets.get(&path[0])?;
+    let (compare, label, right_operand, consumed) = match (
+        instructions.get(instruction_index + 1),
+        instructions.get(instruction_index + 2),
+        instructions.get(instruction_index + 3),
+    ) {
+        (
+            Some(LinearInstruction::LoadInteger(value)),
+            Some(compare),
+            Some(LinearInstruction::JumpIfFalse(label)),
+        ) => (compare, label, value.to_string(), 3),
+        (
+            Some(LinearInstruction::LoadReference(other_path)),
+            Some(compare),
+            Some(LinearInstruction::JumpIfFalse(label)),
+        ) if other_path.len() == 1 => {
+            let right_offset = *local_offsets.get(&other_path[0])?;
+            (compare, label, format!("qword [rbp-{right_offset}]"), 3)
+        }
         _ => return None,
     };
     let jump = inverse_jump_for_compare(compare)?;
 
-    writeln!(output, "    mov rax, qword [rbp-{offset}]").unwrap();
-    writeln!(output, "    cmp rax, {value}").unwrap();
+    writeln!(output, "    mov rax, qword [rbp-{left_offset}]").unwrap();
+    writeln!(output, "    cmp rax, {right_operand}").unwrap();
     writeln!(output, "    {jump} {label}").unwrap();
-    Some(3)
+    Some(consumed)
 }
 
 fn try_render_local_binary_return(
@@ -907,6 +926,42 @@ define function main returns integer
         assert!(!native.contains("load left"));
         assert!(!native.contains("load right"));
         assert!(!native.contains("div_pop"));
+    }
+
+    #[test]
+    fn lowers_two_integer_argument_user_calls_with_less_than_branch_body() {
+        let source = r#"module demo.native
+
+define function helper takes left as integer, right as integer returns integer
+    if left < right
+        return 1
+    else
+        return 0
+
+define function main returns integer
+    return helper(2, 5)
+"#;
+
+        let file = parse_source(source).expect("source should parse");
+        validate_source_file(&file).expect("source should validate");
+        let ir = lower_source_file(&file);
+        let linear = lower_program(&ir).expect("linear lowering should succeed");
+        let native =
+            render_program(&linear, "linux-x86_64").expect("native rendering should succeed");
+
+        assert!(native.contains("helper:"));
+        assert!(native.contains("    sub rsp, 16"));
+        assert!(native.contains("    mov qword [rbp-8], rdi"));
+        assert!(native.contains("    mov qword [rbp-16], rsi"));
+        assert!(native.contains("    mov rax, qword [rbp-8]"));
+        assert!(native.contains("    cmp rax, qword [rbp-16]"));
+        assert!(native.contains("    jge helper_if_else_0"));
+        assert!(!native.contains("cmp_lt_pop"));
+        assert!(!native.contains("jmp_if_false_pop helper_if_else_0"));
+        assert!(native.contains("main:"));
+        assert!(native.contains("    mov rdi, 2"));
+        assert!(native.contains("    mov rsi, 5"));
+        assert!(native.contains("    call helper"));
     }
 
     #[test]
